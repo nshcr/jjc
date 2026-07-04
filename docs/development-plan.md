@@ -88,11 +88,12 @@ Current Vim-compatible commands:
 - `Esc`: return to normal mode
 - `i`, `I`, `a`, `A`, `o`, `O`: enter insert mode
 - `h`, `j`, `k`, `l`, `0`, `^`, `$`, `g_`, `w`, `W`, `b`, `B`, `e`, `E`, `ge`, `gE`, `gg`, `G`: move
+- `%`: jump between paired brackets on the current line
 - `f`, `F`, `t`, `T`, `;`, `,`: find on the current line
 - `x`, `X`, `D`, `C`, `dd`, `cc`, `s`, `S`, `r`, `J`: delete/change/replace/join
 - `yy`, `Y`, `p`, `P`: line yank and paste
 - `~`, `guu`, `gUU`, `g~~`: case conversion
-- `dw`, `cw`, `yw`, `d$`, `c$`, `y$`, `df`, `ct`, `yf`, `guw`, `gUw`, `g~w`, `gUf`, `g~t`: motion ranges
+- `dw`, `cw`, `yw`, `d$`, `c$`, `y$`, `df`, `ct`, `yf`, `ciw`, `diw`, `yiw`, `guw`, `gUw`, `g~w`, `gUf`, `g~t`: motion ranges and inner-word text objects
 - `u`, `Ctrl-r`: undo and redo
 - Insert mode supports ordinary text, `Enter`, `Backspace`, `Delete`,
   `Ctrl-h`, `Ctrl-w`, `Ctrl-u`, `Ctrl-[`, and `Ctrl-c`
@@ -102,9 +103,8 @@ Current Vim-compatible commands:
 Deferred Vim-compatible commands:
 
 - Visual mode
-- `%` matching
 - cross-line motion ranges
-- text objects such as `ciw`, `di(`, and `yap`
+- broader text objects such as `di(` and `yap`
 - macros and registers beyond the single built-in yank buffer
 
 ## Dependency policy
@@ -378,3 +378,12 @@ Start with M0 and the smallest useful piece of M1:
 
 This gives all three entry points a real shape while making the highest-priority
 mode useful first.
+
+## Phase 2
+
+The detailed second-stage plan lives in
+[`docs/phase-2-development-plan.md`](phase-2-development-plan.md). It starts
+from the current M0-M6 implementation, keeps M7 protocol limits explicit, and
+orders the next work around added/deleted diff files, binary diff choices, small
+Vim improvements, merge-boundary cleanup, and preserving the agent-ready editor
+layer without adding an agent runtime.
