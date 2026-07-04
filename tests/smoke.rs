@@ -34,6 +34,31 @@ fn jj_describe_uses_jjc_editor() -> io::Result<()> {
 }
 
 #[test]
+fn jj_describe_q_bang_cancels_edit() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("describe-cancel")?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+
+    let output = jj(&repo)
+        .env("JJC_KEYS", "iChanged<Esc>:q!<Enter>")
+        .arg("--config")
+        .arg(format!("ui.editor=[{},\"edit\"]", toml_string(jjc())))
+        .arg("describe")
+        .arg("--editor")
+        .output()?;
+    assert!(!output.status.success());
+
+    let output = jj(&repo)
+        .args(["log", "-r", "@", "--no-graph", "-T", "description"])
+        .output()?;
+    assert_success_ref(&output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "base\n");
+    Ok(())
+}
+
+#[test]
 fn jj_restore_uses_jjc_diff_editor() -> io::Result<()> {
     if !jj_available() {
         return Ok(());
@@ -52,6 +77,28 @@ fn jj_restore_uses_jjc_diff_editor() -> io::Result<()> {
     assert_success(output);
 
     assert_eq!(fs::read_to_string(repo.join("file.txt"))?, "a\nold\nc\n");
+    Ok(())
+}
+
+#[test]
+fn jj_restore_q_cancels_diff_editor() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("restore-cancel")?;
+    fs::write(repo.join("file.txt"), "a\nold\nc\n")?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+    assert_success(jj(&repo).args(["new", "-m", "work"]).output()?);
+    fs::write(repo.join("file.txt"), "a\nnew\nc\n")?;
+
+    let output = jj(&repo)
+        .env("JJC_KEYS", "q")
+        .args(diff_editor_config())
+        .args(["restore", "-i", "--tool", "jjc"])
+        .output()?;
+    assert!(!output.status.success());
+
+    assert_eq!(fs::read_to_string(repo.join("file.txt"))?, "a\nnew\nc\n");
     Ok(())
 }
 
@@ -111,6 +158,32 @@ fn jj_split_can_select_one_changed_line_with_jjc() -> io::Result<()> {
 }
 
 #[test]
+fn jj_split_can_select_deleted_line_with_jjc() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("deleted-line-split")?;
+    fs::write(repo.join("file.txt"), "a\nold\nc\n")?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+    assert_success(jj(&repo).args(["new", "-m", "work"]).output()?);
+    fs::write(repo.join("file.txt"), "a\nc\n")?;
+
+    let output = jj(&repo)
+        .env("JJC_KEYS", "w")
+        .args(diff_editor_config())
+        .args(["split", "--tool", "jjc", "-m", "selected"])
+        .output()?;
+    assert_success(output);
+
+    let output = jj(&repo)
+        .args(["file", "show", "-r", "@-", "file.txt"])
+        .output()?;
+    assert_success_ref(&output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "a\nc\n");
+    Ok(())
+}
+
+#[test]
 fn jj_resolve_uses_jjc_merge_editor() -> io::Result<()> {
     if !jj_available() {
         return Ok(());
@@ -141,6 +214,26 @@ fn jj_resolve_uses_jjc_merge_editor() -> io::Result<()> {
     let output = jj(&repo).args(["resolve", "--list"]).output()?;
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("No conflicts found"));
+    Ok(())
+}
+
+#[test]
+fn jj_resolve_q_cancels_merge_editor() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = conflict_repo("resolve-cancel")?;
+
+    let output = jj(&repo)
+        .env("JJC_KEYS", "q")
+        .args(merge_editor_config())
+        .args(["resolve", "--tool", "jjc", "file.txt"])
+        .output()?;
+    assert!(!output.status.success());
+
+    let output = jj(&repo).args(["resolve", "--list"]).output()?;
+    assert_success_ref(&output);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("file.txt"));
     Ok(())
 }
 
@@ -379,6 +472,24 @@ fn delete_modify_repo(name: &str) -> io::Result<PathBuf> {
     assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
     assert_success(jj(&repo).args(["new", "-m", "left"]).output()?);
     fs::remove_file(repo.join("file.txt"))?;
+    let left = rev(&repo)?;
+    assert_success(jj(&repo).args(["new", "@-", "-m", "right"]).output()?);
+    fs::write(repo.join("file.txt"), "right\n")?;
+    let right = rev(&repo)?;
+    assert_success(
+        jj(&repo)
+            .args(["new", &left, &right, "-m", "merge"])
+            .output()?,
+    );
+    Ok(repo)
+}
+
+fn conflict_repo(name: &str) -> io::Result<PathBuf> {
+    let repo = init_repo(name)?;
+    fs::write(repo.join("file.txt"), "base\n")?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+    assert_success(jj(&repo).args(["new", "-m", "left"]).output()?);
+    fs::write(repo.join("file.txt"), "left\n")?;
     let left = rev(&repo)?;
     assert_success(jj(&repo).args(["new", "@-", "-m", "right"]).output()?);
     fs::write(repo.join("file.txt"), "right\n")?;
