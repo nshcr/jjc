@@ -97,7 +97,7 @@ Current Vim-compatible commands:
 - Insert mode supports ordinary text, `Enter`, `Backspace`, `Delete`,
   `Ctrl-h`, `Ctrl-w`, `Ctrl-u`, `Ctrl-[`, and `Ctrl-c`
 - `:wq`: save and quit
-- `:q!`: discard and quit
+- `:q!`: cancel the editor and exit non-zero
 
 Deferred Vim-compatible commands:
 
@@ -169,7 +169,7 @@ Scope:
 - Built-in text editing for UTF-8 files.
 - Shared Vim-like `normal`/`insert` behavior.
 - `:wq` writes the file and exits.
-- `:q!` exits without writing.
+- `:q!` exits without writing and returns non-zero so `jj` cancels the edit.
 - `JJ:` comment lines may be visually muted, but the file should be preserved
   exactly unless the user edits it. Let `jj` decide how to interpret comments.
 

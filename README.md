@@ -72,6 +72,7 @@ Diff mode:
 
 - `j`, `k`: move between hunks
 - `Space`: toggle hunk
+- expanded hunks show standard `space`, `+`, and `-` diff rows
 - `e`: manually edit the current file output with the same Vim-like text editor
 - `w`: write `$output` and quit
 - `q`: quit without writing
