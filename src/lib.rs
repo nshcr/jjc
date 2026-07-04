@@ -1,10 +1,13 @@
 pub mod app;
 pub mod buffer;
 pub mod cli;
+pub mod config;
 pub mod diff;
 pub mod editor;
 pub mod input;
 pub mod merge;
+pub mod render;
 pub mod scroll;
 pub mod syntax;
+pub mod theme;
 pub mod vim;

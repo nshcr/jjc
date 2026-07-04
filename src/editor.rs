@@ -9,10 +9,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
-use ratatui::style::Modifier;
-use ratatui::style::Style;
 use ratatui::text::Line;
-use ratatui::text::Span;
 use ratatui::widgets::Block;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Scrollbar;
@@ -20,7 +17,9 @@ use ratatui::widgets::ScrollbarOrientation;
 
 use crate::buffer::AgentSuggestion;
 use crate::buffer::TextBuffer;
+use crate::config::AppConfig;
 use crate::input;
+use crate::render::StyledText;
 use crate::scroll::ViewScroll;
 use crate::scroll::scrollbar_area;
 use crate::vim::Vim;
@@ -39,6 +38,7 @@ pub struct Editor {
     vim: Vim,
     command: String,
     scroll: ViewScroll,
+    config: AppConfig,
 }
 
 impl Editor {
@@ -51,6 +51,7 @@ impl Editor {
             vim: Vim::new(),
             command: String::new(),
             scroll: ViewScroll::default(),
+            config: AppConfig::load()?,
         })
     }
 
@@ -61,18 +62,7 @@ impl Editor {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Min(1), Constraint::Length(1)])
                     .split(frame.area());
-                let text = self
-                    .buffer
-                    .lines()
-                    .iter()
-                    .map(|line| {
-                        if line.starts_with("JJ:") {
-                            Line::from(Span::styled(line, Style::new().add_modifier(Modifier::DIM)))
-                        } else {
-                            Line::from(line.as_str())
-                        }
-                    })
-                    .collect::<Vec<_>>();
+                let text = self.render_text();
                 let height = rows[0].height.saturating_sub(2) as usize;
                 self.scroll
                     .keep_visible(self.buffer.cursor_y(), text.len(), height);
@@ -174,6 +164,10 @@ impl Editor {
             Mode::Text => "INSERT  Esc normal".to_owned(),
             Mode::Command => format!(":{}", self.command),
         }
+    }
+
+    fn render_text(&self) -> Vec<Line<'static>> {
+        StyledText::new(&self.path, self.buffer.lines(), &self.config).lines()
     }
 }
 

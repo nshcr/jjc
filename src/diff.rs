@@ -25,7 +25,9 @@ use similar::DiffTag;
 use similar::TextDiff;
 
 use crate::buffer::TextBuffer;
+use crate::config::AppConfig;
 use crate::input;
+use crate::render::StyledText;
 use crate::scroll::ViewScroll;
 use crate::scroll::scrollbar_area;
 use crate::syntax;
@@ -43,6 +45,7 @@ pub struct DiffApp {
     edit_vim: Vim,
     undo: Vec<SelectionSnapshot>,
     redo: Vec<SelectionSnapshot>,
+    config: AppConfig,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -122,6 +125,7 @@ impl DiffApp {
             edit_vim: Vim::new(),
             undo: Vec::new(),
             redo: Vec::new(),
+            config: AppConfig::load()?,
         })
     }
 
@@ -227,7 +231,7 @@ impl DiffApp {
         self.edit_vim.handle_key(buffer, key);
     }
 
-    fn lines(&self) -> Vec<Line<'_>> {
+    fn lines(&self) -> Vec<Line<'static>> {
         if self.files.is_empty() {
             return vec![Line::from("no changed files")];
         }
@@ -242,7 +246,7 @@ impl DiffApp {
                 Style::new().add_modifier(Modifier::BOLD),
             ))];
             if let Some(buffer) = &file.manual_output {
-                lines.extend(buffer.lines().iter().map(|line| Line::from(line.as_str())));
+                lines.extend(StyledText::new(&file.path, buffer.lines(), &self.config).lines());
             }
             return lines;
         }
@@ -261,6 +265,10 @@ impl DiffApp {
                 )));
                 continue;
             }
+            let left_display_lines = display_lines(&file.left_lines);
+            let right_display_lines = display_lines(&file.right_lines);
+            let left_styled = StyledText::new(&file.path, &left_display_lines, &self.config);
+            let right_styled = StyledText::new(&file.path, &right_display_lines, &self.config);
             for (hunk_index, hunk) in file.hunks.iter().enumerate() {
                 let marker = if hunk.selected { "[x]" } else { "[ ]" };
                 let prefix = if self
@@ -289,18 +297,28 @@ impl DiffApp {
                             _ if row.selected => "[x]",
                             _ => "[ ]",
                         };
-                        let (sign, text) = match row.kind {
-                            DiffRowKind::Equal { new_index } => {
-                                (" ", file.right_lines[new_index].trim_end())
-                            }
-                            DiffRowKind::Delete { old_index } => {
-                                ("-", file.left_lines[old_index].trim_end())
-                            }
-                            DiffRowKind::Insert { new_index } => {
-                                ("+", file.right_lines[new_index].trim_end())
-                            }
+                        let prefix = match row.kind {
+                            DiffRowKind::Equal { .. } => format!("  {cursor} {marker}  "),
+                            DiffRowKind::Delete { .. } => format!("  {cursor} {marker} -"),
+                            DiffRowKind::Insert { .. } => format!("  {cursor} {marker} +"),
                         };
-                        lines.push(Line::from(format!("  {cursor} {marker} {sign}{text}")));
+                        lines.push(match row.kind {
+                            DiffRowKind::Equal { new_index } => right_styled.line_with_prefix(
+                                new_index,
+                                prefix,
+                                &right_display_lines[new_index],
+                            ),
+                            DiffRowKind::Delete { old_index } => left_styled.line_with_prefix(
+                                old_index,
+                                prefix,
+                                &left_display_lines[old_index],
+                            ),
+                            DiffRowKind::Insert { new_index } => right_styled.line_with_prefix(
+                                new_index,
+                                prefix,
+                                &right_display_lines[new_index],
+                            ),
+                        });
                     }
                 }
                 entry_index += 1;
@@ -606,6 +624,13 @@ impl DiffFile {
     fn render_selection(&self) -> String {
         render_hunks(&self.left_lines, &self.right_lines, &self.hunks)
     }
+}
+
+fn display_lines(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| line.trim_end().to_owned())
+        .collect()
 }
 
 fn changed_paths(left: &Path, right: &Path) -> io::Result<Vec<PathBuf>> {
@@ -1152,6 +1177,49 @@ mod tests {
     }
 
     #[test]
+    fn diff_lines_highlight_non_rust_code() {
+        let root = std::env::temp_dir().join(format!(
+            "jjc-diff-highlight-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let left = root.join("left");
+        let right = root.join("right");
+        let output = root.join("output");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::create_dir_all(&output).unwrap();
+        fs::write(left.join("app.py"), "def main():\n    return \"old\"\n").unwrap();
+        fs::write(
+            right.join("app.py"),
+            "def main():\n    return \"new\" # greet\n",
+        )
+        .unwrap();
+
+        let app = DiffApp::open(left, right, output).unwrap();
+        let lines = app.lines();
+
+        assert!(has_span(
+            &lines,
+            "return",
+            crate::syntax::HighlightClass::Keyword
+        ));
+        assert!(has_span(
+            &lines,
+            "\"new\"",
+            crate::syntax::HighlightClass::String
+        ));
+        assert!(has_span(
+            &lines,
+            "# greet",
+            crate::syntax::HighlightClass::Comment
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn rust_hunks_are_labeled_with_function() {
         let left = "fn demo() {\n    let value = 1;\n}\n";
         let right = "fn demo() {\n    let value = 2;\n}\n";
@@ -1234,5 +1302,14 @@ mod tests {
         assert_eq!(app.files[0].render(), "a\nold\nc\n");
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn has_span(lines: &[Line<'_>], text: &str, class: crate::syntax::HighlightClass) -> bool {
+        let style = AppConfig::default().theme.style(class);
+        lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.as_ref() == text && span.style == style)
+        })
     }
 }

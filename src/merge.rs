@@ -17,7 +17,10 @@ use ratatui::widgets::Scrollbar;
 use ratatui::widgets::ScrollbarOrientation;
 
 use crate::buffer::TextBuffer;
+use crate::config::AppConfig;
 use crate::input;
+use crate::render::StyledText;
+use crate::render::string_lines;
 use crate::scroll::ViewScroll;
 use crate::scroll::scrollbar_area;
 use crate::vim::Vim;
@@ -60,6 +63,7 @@ pub struct MergeApp {
     vim: Vim,
     command: String,
     scroll: ViewScroll,
+    config: AppConfig,
 }
 
 impl MergeApp {
@@ -102,6 +106,7 @@ impl MergeApp {
             vim: Vim::new(),
             command: String::new(),
             scroll: ViewScroll::default(),
+            config: AppConfig::load()?,
         })
     }
 
@@ -128,17 +133,38 @@ impl MergeApp {
                         right,
                         output,
                     } => {
+                        let path = Path::new(&self.path);
+                        let left_lines = string_lines(left);
+                        let base_lines = string_lines(base);
+                        let right_lines = string_lines(right);
                         let height = columns[3].height.saturating_sub(2) as usize;
                         self.scroll
                             .keep_visible(output.cursor_y(), output.lines().len(), height);
                         let scroll = self.scroll.offset();
                         let mut scrollbar_state =
                             self.scroll.scrollbar_state(output.lines().len(), height);
-                        frame.render_widget(pane("left", left.lines(), scroll), columns[0]);
-                        frame.render_widget(pane("base", base.lines(), scroll), columns[1]);
-                        frame.render_widget(pane("right", right.lines(), scroll), columns[2]);
                         frame.render_widget(
-                            pane("output", output.lines().iter().map(String::as_str), scroll),
+                            pane("left", pane_lines(path, &left_lines, &self.config), scroll),
+                            columns[0],
+                        );
+                        frame.render_widget(
+                            pane("base", pane_lines(path, &base_lines, &self.config), scroll),
+                            columns[1],
+                        );
+                        frame.render_widget(
+                            pane(
+                                "right",
+                                pane_lines(path, &right_lines, &self.config),
+                                scroll,
+                            ),
+                            columns[2],
+                        );
+                        frame.render_widget(
+                            pane(
+                                "output",
+                                pane_lines(path, output.lines(), &self.config),
+                                scroll,
+                            ),
                             columns[3],
                         );
                         frame.render_stateful_widget(
@@ -326,16 +352,20 @@ fn read_optional_text(path: &Path) -> io::Result<Option<String>> {
     }
 }
 
-fn pane<'a>(title: &'a str, lines: impl Iterator<Item = &'a str>, scroll: usize) -> Paragraph<'a> {
-    Paragraph::new(lines.map(Line::from).collect::<Vec<_>>())
+fn pane(title: &str, lines: Vec<Line<'static>>, scroll: usize) -> Paragraph<'static> {
+    Paragraph::new(lines)
         .scroll((scroll as u16, 0))
-        .block(Block::bordered().title(title))
+        .block(Block::bordered().title(title.to_owned()))
 }
 
-fn binary_pane<'a>(title: &'a str, bytes: &[u8], selected: bool) -> Paragraph<'a> {
+fn pane_lines(path: &Path, lines: &[String], config: &AppConfig) -> Vec<Line<'static>> {
+    StyledText::new(path, lines, config).lines()
+}
+
+fn binary_pane(title: &str, bytes: &[u8], selected: bool) -> Paragraph<'static> {
     let marker = if selected { "selected" } else { "" };
     Paragraph::new(format!("binary\n{} bytes\n{marker}", bytes.len()))
-        .block(Block::bordered().title(title))
+        .block(Block::bordered().title(title.to_owned()))
 }
 
 #[cfg(test)]
@@ -390,6 +420,7 @@ mod tests {
             vim: Vim::new(),
             command: String::new(),
             scroll: ViewScroll::default(),
+            config: AppConfig::default(),
         };
 
         app.save().unwrap();
@@ -433,6 +464,31 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn merge_pane_lines_highlight_non_rust_code() {
+        let lines = vec![
+            "def main():".to_owned(),
+            "    return \"right\" # side".to_owned(),
+        ];
+        let rendered = pane_lines(Path::new("app.py"), &lines, &AppConfig::default());
+
+        assert!(has_span(
+            &rendered,
+            "return",
+            crate::syntax::HighlightClass::Keyword
+        ));
+        assert!(has_span(
+            &rendered,
+            "\"right\"",
+            crate::syntax::HighlightClass::String
+        ));
+        assert!(has_span(
+            &rendered,
+            "# side",
+            crate::syntax::HighlightClass::Comment
+        ));
+    }
+
     fn app(output: PathBuf) -> MergeApp {
         MergeApp {
             content: MergeContent::Text {
@@ -448,6 +504,7 @@ mod tests {
             vim: Vim::new(),
             command: String::new(),
             scroll: ViewScroll::default(),
+            config: AppConfig::default(),
         }
     }
 
@@ -457,5 +514,14 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let output = root.join("out.txt");
         (root, output)
+    }
+
+    fn has_span(lines: &[Line<'_>], text: &str, class: crate::syntax::HighlightClass) -> bool {
+        let style = AppConfig::default().theme.style(class);
+        lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.as_ref() == text && span.style == style)
+        })
     }
 }
