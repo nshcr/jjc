@@ -16,8 +16,9 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Block;
-use ratatui::widgets::Borders;
 use ratatui::widgets::Paragraph;
+use ratatui::widgets::Scrollbar;
+use ratatui::widgets::ScrollbarOrientation;
 use similar::Algorithm;
 use similar::DiffOp;
 use similar::DiffTag;
@@ -25,6 +26,8 @@ use similar::TextDiff;
 
 use crate::buffer::TextBuffer;
 use crate::input;
+use crate::scroll::ViewScroll;
+use crate::scroll::scrollbar_area;
 use crate::syntax;
 use crate::vim::Vim;
 use crate::vim::VimMode;
@@ -35,6 +38,7 @@ pub struct DiffApp {
     entries: Vec<Entry>,
     cursor: usize,
     line_cursor: usize,
+    scroll: ViewScroll,
     mode: Mode,
     edit_vim: Vim,
     undo: Vec<SelectionSnapshot>,
@@ -68,17 +72,22 @@ struct Hunk {
     new_start: usize,
     new_end: usize,
     selected: bool,
-    line_choices: Vec<LineChoice>,
+    rows: Vec<DiffRow>,
     function: Option<String>,
     summary: String,
 }
 
-enum LineChoice {
-    Equal,
-    Changed {
-        selected: bool,
-        old_index: Option<usize>,
-    },
+struct DiffRow {
+    kind: DiffRowKind,
+    selected: bool,
+    group: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiffRowKind {
+    Equal { new_index: usize },
+    Delete { old_index: usize },
+    Insert { new_index: usize },
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -108,6 +117,7 @@ impl DiffApp {
             entries,
             cursor: 0,
             line_cursor: 0,
+            scroll: ViewScroll::default(),
             mode: Mode::Select,
             edit_vim: Vim::new(),
             undo: Vec::new(),
@@ -122,10 +132,22 @@ impl DiffApp {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Min(1), Constraint::Length(1)])
                     .split(frame.area());
+                let height = rows[0].height.saturating_sub(2) as usize;
+                let line_count = self.line_count();
+                self.scroll
+                    .keep_visible(self.cursor_line_index(), line_count, height);
+                let mut scrollbar_state = self.scroll.scrollbar_state(line_count, height);
+                let lines = self.lines();
                 frame.render_widget(
-                    Paragraph::new(self.lines())
-                        .block(Block::new().title("jjc diff").borders(Borders::ALL)),
+                    Paragraph::new(lines)
+                        .scroll((self.scroll.offset() as u16, 0))
+                        .block(Block::bordered().title("jjc diff")),
                     rows[0],
+                );
+                frame.render_stateful_widget(
+                    Scrollbar::new(ScrollbarOrientation::VerticalRight),
+                    scrollbar_area(rows[0]),
+                    &mut scrollbar_state,
                 );
                 frame.render_widget(Paragraph::new(self.status()), rows[1]);
                 if self.mode == Mode::Edit
@@ -138,11 +160,8 @@ impl DiffApp {
                             .min(rows[0].width.saturating_sub(2) as usize)
                             as u16;
                     let y = rows[0].y
-                        + 2
-                        + buffer
-                            .cursor_y()
-                            .min(rows[0].height.saturating_sub(3) as usize)
-                            as u16;
+                        + 1
+                        + self.scroll.visible_line(self.cursor_line_index(), height) as u16;
                     frame.set_cursor_position((x, y));
                 }
             })?;
@@ -172,6 +191,8 @@ impl DiffApp {
             KeyCode::Char('k') | KeyCode::Up => self.move_up(),
             KeyCode::Char('n') => self.move_line_down(),
             KeyCode::Char('p') => self.move_line_up(),
+            KeyCode::PageDown => self.move_line_by(10),
+            KeyCode::PageUp => self.move_line_by(-10),
             KeyCode::Char(' ') => self.toggle_current(),
             KeyCode::Char('x') => self.toggle_current_line(),
             KeyCode::Char('f') => self.toggle_current_function(),
@@ -182,7 +203,9 @@ impl DiffApp {
                 self.write_output()?;
                 return Ok(true);
             }
-            KeyCode::Char('q') => return Ok(true),
+            KeyCode::Char('q') => {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "diff canceled"));
+            }
             _ => {}
         }
         Ok(false)
@@ -219,13 +242,7 @@ impl DiffApp {
                 Style::new().add_modifier(Modifier::BOLD),
             ))];
             if let Some(buffer) = &file.manual_output {
-                lines.extend(
-                    buffer
-                        .lines()
-                        .iter()
-                        .take(200)
-                        .map(|line| Line::from(line.as_str())),
-                );
+                lines.extend(buffer.lines().iter().map(|line| Line::from(line.as_str())));
             }
             return lines;
         }
@@ -261,21 +278,29 @@ impl DiffApp {
                     .get(self.cursor)
                     .is_some_and(|entry| entry.file == file_index && entry.hunk == hunk_index)
                 {
-                    for (line_index, choice) in hunk.line_choices.iter().enumerate() {
+                    for (line_index, row) in hunk.rows.iter().enumerate() {
                         let cursor = if line_index == self.line_cursor {
                             ">"
                         } else {
                             " "
                         };
-                        let marker = match choice {
-                            LineChoice::Equal => "[=]",
-                            LineChoice::Changed { selected: true, .. } => "[x]",
-                            LineChoice::Changed {
-                                selected: false, ..
-                            } => "[ ]",
+                        let marker = match row.kind {
+                            DiffRowKind::Equal { .. } => "[=]",
+                            _ if row.selected => "[x]",
+                            _ => "[ ]",
                         };
-                        let text = file.right_lines[hunk.new_start + line_index].trim_end();
-                        lines.push(Line::from(format!("  {cursor} {marker} +{text}")));
+                        let (sign, text) = match row.kind {
+                            DiffRowKind::Equal { new_index } => {
+                                (" ", file.right_lines[new_index].trim_end())
+                            }
+                            DiffRowKind::Delete { old_index } => {
+                                ("-", file.left_lines[old_index].trim_end())
+                            }
+                            DiffRowKind::Insert { new_index } => {
+                                ("+", file.right_lines[new_index].trim_end())
+                            }
+                        };
+                        lines.push(Line::from(format!("  {cursor} {marker} {sign}{text}")));
                     }
                 }
                 entry_index += 1;
@@ -290,7 +315,7 @@ impl DiffApp {
     fn status(&self) -> &'static str {
         match self.mode {
             Mode::Select => {
-                "j/k hunk  n/p line  space/x toggle  f function  e edit output  u undo  r redo  w write  q quit"
+                "j/k hunk  n/p/PgUp/PgDn line  space/x toggle  f function  e edit output  u undo  r redo  w write  q cancel"
             }
             Mode::Edit if self.edit_vim.mode() == VimMode::Normal => {
                 "EDIT OUTPUT NORMAL  i/a/o insert  h/j/k/l/w/b/e move  x/dd delete  Esc select"
@@ -313,13 +338,21 @@ impl DiffApp {
 
     fn move_line_down(&mut self) {
         if let Some(hunk) = self.current_hunk() {
-            self.line_cursor =
-                (self.line_cursor + 1).min(hunk.line_choices.len().saturating_sub(1));
+            self.line_cursor = (self.line_cursor + 1).min(hunk.rows.len().saturating_sub(1));
         }
     }
 
     fn move_line_up(&mut self) {
         self.line_cursor = self.line_cursor.saturating_sub(1);
+    }
+
+    fn move_line_by(&mut self, delta: isize) {
+        if let Some(hunk) = self.current_hunk() {
+            self.line_cursor = self
+                .line_cursor
+                .saturating_add_signed(delta)
+                .min(hunk.rows.len().saturating_sub(1));
+        }
     }
 
     fn toggle_current(&mut self) {
@@ -422,6 +455,73 @@ impl DiffApp {
     fn current_hunk(&self) -> Option<&Hunk> {
         let entry = self.entries.get(self.cursor)?;
         self.files.get(entry.file)?.hunks.get(entry.hunk)
+    }
+
+    fn cursor_line_index(&self) -> usize {
+        if self.mode == Mode::Edit {
+            return self
+                .current_edit_buffer()
+                .map(|buffer| buffer.cursor_y() + 1)
+                .unwrap_or(0);
+        }
+
+        let current = self.entries.get(self.cursor);
+        let mut index = 0;
+        for (file_index, file) in self.files.iter().enumerate() {
+            index += 1;
+            if file.unsupported.is_some() {
+                index += 1;
+                continue;
+            }
+            for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+                let is_current = current
+                    .is_some_and(|entry| entry.file == file_index && entry.hunk == hunk_index);
+                if is_current {
+                    return index + 1 + self.line_cursor.min(hunk.rows.len().saturating_sub(1));
+                }
+                index += 1;
+            }
+        }
+        0
+    }
+
+    fn line_count(&self) -> usize {
+        if self.files.is_empty() {
+            return 1;
+        }
+        if self.mode == Mode::Edit {
+            let Some(entry) = self.entries.get(self.cursor) else {
+                return 1;
+            };
+            return 1 + self.files[entry.file]
+                .manual_output
+                .as_ref()
+                .map(|buffer| buffer.lines().len())
+                .unwrap_or(0);
+        }
+
+        let current = self.entries.get(self.cursor);
+        let mut count = 0;
+        let mut hunk_count = 0;
+        for (file_index, file) in self.files.iter().enumerate() {
+            count += 1;
+            if file.unsupported.is_some() {
+                count += 1;
+                continue;
+            }
+            for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+                count += 1;
+                hunk_count += 1;
+                if current.is_some_and(|entry| entry.file == file_index && entry.hunk == hunk_index)
+                {
+                    count += hunk.rows.len();
+                }
+            }
+        }
+        if hunk_count == 0 {
+            count += 1;
+        }
+        count
     }
 
     fn current_edit_buffer(&self) -> Option<&TextBuffer> {
@@ -570,31 +670,73 @@ fn hunk_from_ops(path: &Path, right: &str, ops: &[DiffOp]) -> Option<Hunk> {
         return None;
     }
 
-    let mut line_choices = (new_start..new_end)
-        .map(|_| LineChoice::Equal)
-        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    let mut next_group = 0;
     for op in ops {
         let (tag, old, new) = op.as_tag_tuple();
         match tag {
-            DiffTag::Equal | DiffTag::Delete => {}
+            DiffTag::Equal => {
+                for new_index in new {
+                    rows.push(DiffRow {
+                        kind: DiffRowKind::Equal { new_index },
+                        selected: true,
+                        group: None,
+                    });
+                }
+            }
+            DiffTag::Delete => {
+                for old_index in old {
+                    rows.push(DiffRow {
+                        kind: DiffRowKind::Delete { old_index },
+                        selected: true,
+                        group: Some(next_group),
+                    });
+                    next_group += 1;
+                }
+            }
             DiffTag::Insert => {
                 for new_index in new {
-                    line_choices[new_index - new_start] = LineChoice::Changed {
+                    rows.push(DiffRow {
+                        kind: DiffRowKind::Insert { new_index },
                         selected: true,
-                        old_index: None,
-                    };
+                        group: Some(next_group),
+                    });
+                    next_group += 1;
                 }
             }
             DiffTag::Replace => {
-                for (offset, new_index) in new.enumerate() {
-                    let old_index = (offset < old.len()).then_some(old.start + offset);
-                    line_choices[new_index - new_start] = LineChoice::Changed {
-                        selected: true,
-                        old_index,
-                    };
+                let len = old.len().max(new.len());
+                for offset in 0..len {
+                    let group = Some(next_group);
+                    next_group += 1;
+                    if offset < old.len() {
+                        rows.push(DiffRow {
+                            kind: DiffRowKind::Delete {
+                                old_index: old.start + offset,
+                            },
+                            selected: true,
+                            group,
+                        });
+                    }
+                    if offset < new.len() {
+                        rows.push(DiffRow {
+                            kind: DiffRowKind::Insert {
+                                new_index: new.start + offset,
+                            },
+                            selected: true,
+                            group,
+                        });
+                    }
                 }
             }
         }
+    }
+
+    if rows
+        .iter()
+        .all(|row| matches!(row.kind, DiffRowKind::Equal { .. }))
+    {
+        return None;
     }
 
     let function = syntax::function_for_line(path, right, new_start + 1);
@@ -609,7 +751,7 @@ fn hunk_from_ops(path: &Path, right: &str, ops: &[DiffOp]) -> Option<Hunk> {
         new_start,
         new_end,
         selected: true,
-        line_choices,
+        rows,
         function,
         summary: format!(
             "-{} +{}{}",
@@ -648,82 +790,84 @@ fn render_hunks(left: &[String], right: &[String], hunks: &[Hunk]) -> String {
 
 fn render_partial_hunk(left: &[String], right: &[String], hunk: &Hunk) -> Vec<String> {
     let mut output = Vec::new();
-    for (index, choice) in hunk.line_choices.iter().enumerate() {
-        match choice {
-            LineChoice::Equal => output.push(right[hunk.new_start + index].clone()),
-            LineChoice::Changed { selected: true, .. } => {
-                output.push(right[hunk.new_start + index].clone());
+    for row in &hunk.rows {
+        match row.kind {
+            DiffRowKind::Equal { new_index } => output.push(right[new_index].clone()),
+            DiffRowKind::Delete { old_index } if !row.selected => {
+                output.push(left[old_index].clone());
             }
-            LineChoice::Changed {
-                selected: false,
-                old_index: Some(old_index),
-            } => output.push(left[*old_index].clone()),
-            LineChoice::Changed {
-                selected: false,
-                old_index: None,
-            } => {}
+            DiffRowKind::Insert { new_index } if row.selected => {
+                output.push(right[new_index].clone());
+            }
+            _ => {}
         }
     }
     output
 }
 
+impl DiffRowKind {
+    fn changed(self) -> bool {
+        !matches!(self, Self::Equal { .. })
+    }
+}
+
 impl Hunk {
     fn set_selected(&mut self, selected: bool) {
         self.selected = selected;
-        for choice in &mut self.line_choices {
-            if let LineChoice::Changed {
-                selected: line_selected,
-                ..
-            } = choice
-            {
-                *line_selected = selected;
+        for row in &mut self.rows {
+            if row.kind.changed() {
+                row.selected = selected;
             }
         }
     }
 
     fn toggle_line(&mut self, index: usize) {
-        if let Some(LineChoice::Changed { selected, .. }) = self.line_choices.get_mut(index) {
-            *selected = !*selected;
-            self.selected = self.any_selected();
+        let Some(group) = self.rows.get(index).and_then(|row| row.group) else {
+            return;
+        };
+        let selected = !self.rows[index].selected;
+        for row in &mut self.rows {
+            if row.group == Some(group) {
+                row.selected = selected;
+            }
         }
+        self.selected = self.any_selected();
     }
 
     fn selected_lines(&self) -> Vec<bool> {
-        self.line_choices
+        self.rows
             .iter()
-            .map(|choice| match choice {
-                LineChoice::Equal => true,
-                LineChoice::Changed { selected, .. } => *selected,
+            .map(|row| {
+                if row.kind.changed() {
+                    row.selected
+                } else {
+                    true
+                }
             })
             .collect()
     }
 
     fn restore_selected_lines(&mut self, selected_lines: &[bool]) {
-        for (choice, selected) in self.line_choices.iter_mut().zip(selected_lines) {
-            if let LineChoice::Changed {
-                selected: line_selected,
-                ..
-            } = choice
-            {
-                *line_selected = *selected;
+        for (row, selected) in self.rows.iter_mut().zip(selected_lines) {
+            if row.kind.changed() {
+                row.selected = *selected;
             }
         }
         self.selected = self.any_selected();
     }
 
     fn any_selected(&self) -> bool {
-        self.line_choices.iter().any(|choice| match choice {
-            LineChoice::Equal => false,
-            LineChoice::Changed { selected, .. } => *selected,
-        })
+        self.rows
+            .iter()
+            .any(|row| row.kind.changed() && row.selected)
     }
 
     fn all_selected(&self) -> bool {
         self.selected
-            && self.line_choices.iter().all(|choice| match choice {
-                LineChoice::Equal => true,
-                LineChoice::Changed { selected, .. } => *selected,
-            })
+            && self
+                .rows
+                .iter()
+                .all(|row| !row.kind.changed() || row.selected)
     }
 }
 
@@ -786,12 +930,44 @@ mod tests {
     }
 
     #[test]
+    fn deleted_line_is_an_explicit_diff_row() {
+        let left = "a\nold\nc\n";
+        let right = "a\nc\n";
+        let left_lines = split_keep_newline(left);
+        let right_lines = split_keep_newline(right);
+        let mut hunks = hunks(Path::new("file.txt"), left, right);
+
+        assert_eq!(
+            hunks[0].rows.iter().map(|row| row.kind).collect::<Vec<_>>(),
+            vec![
+                DiffRowKind::Equal { new_index: 0 },
+                DiffRowKind::Delete { old_index: 1 },
+                DiffRowKind::Equal { new_index: 1 },
+            ]
+        );
+        hunks[0].toggle_line(1);
+
+        assert_eq!(render_hunks(&left_lines, &right_lines, &hunks), left);
+    }
+
+    #[test]
     fn replacement_line_can_fall_back_to_old_line() {
         let left = "a\nold\nc\n";
         let right = "a\nnew\nc\n";
         let left_lines = split_keep_newline(left);
         let right_lines = split_keep_newline(right);
         let mut hunks = hunks(Path::new("file.txt"), left, right);
+
+        assert_eq!(
+            hunks[0].rows.iter().map(|row| row.kind).collect::<Vec<_>>(),
+            vec![
+                DiffRowKind::Equal { new_index: 0 },
+                DiffRowKind::Delete { old_index: 1 },
+                DiffRowKind::Insert { new_index: 1 },
+                DiffRowKind::Equal { new_index: 2 },
+            ]
+        );
+        assert_eq!(hunks[0].rows[1].group, hunks[0].rows[2].group);
         hunks[0].toggle_line(1);
 
         assert_eq!(
@@ -883,6 +1059,36 @@ mod tests {
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("file.bin"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn q_cancels_diff_edit() {
+        let root = std::env::temp_dir().join(format!(
+            "jjc-diff-cancel-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let left = root.join("left");
+        let right = root.join("right");
+        let output = root.join("output");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::create_dir_all(&output).unwrap();
+        fs::write(left.join("file.txt"), "a\nold\nc\n").unwrap();
+        fs::write(right.join("file.txt"), "a\nnew\nc\n").unwrap();
+
+        let mut app = DiffApp::open(left, right, output).unwrap();
+        let err = app
+            .handle_key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('q'),
+                KeyModifiers::NONE,
+            ))
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
         fs::remove_dir_all(root).unwrap();
     }
 

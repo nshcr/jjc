@@ -14,12 +14,15 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Block;
-use ratatui::widgets::Borders;
 use ratatui::widgets::Paragraph;
+use ratatui::widgets::Scrollbar;
+use ratatui::widgets::ScrollbarOrientation;
 
 use crate::buffer::AgentSuggestion;
 use crate::buffer::TextBuffer;
 use crate::input;
+use crate::scroll::ViewScroll;
+use crate::scroll::scrollbar_area;
 use crate::vim::Vim;
 use crate::vim::VimMode;
 
@@ -35,6 +38,7 @@ pub struct Editor {
     mode: Mode,
     vim: Vim,
     command: String,
+    scroll: ViewScroll,
 }
 
 impl Editor {
@@ -46,6 +50,7 @@ impl Editor {
             mode: Mode::Text,
             vim: Vim::new(),
             command: String::new(),
+            scroll: ViewScroll::default(),
         })
     }
 
@@ -68,30 +73,34 @@ impl Editor {
                         }
                     })
                     .collect::<Vec<_>>();
+                let height = rows[0].height.saturating_sub(2) as usize;
+                self.scroll
+                    .keep_visible(self.buffer.cursor_y(), text.len(), height);
+                let mut scrollbar_state = self.scroll.scrollbar_state(text.len(), height);
 
                 frame.render_widget(
-                    Paragraph::new(text).block(
-                        Block::new()
-                            .title(format!("jjc edit {}", self.path.display()))
-                            .borders(Borders::ALL),
-                    ),
+                    Paragraph::new(text)
+                        .scroll((self.scroll.offset() as u16, 0))
+                        .block(
+                            Block::bordered().title(format!("jjc edit {}", self.path.display())),
+                        ),
                     rows[0],
+                );
+                frame.render_stateful_widget(
+                    Scrollbar::new(ScrollbarOrientation::VerticalRight),
+                    scrollbar_area(rows[0]),
+                    &mut scrollbar_state,
                 );
                 frame.render_widget(Paragraph::new(self.status()), rows[1]);
 
+                let visible_y = self.scroll.visible_line(self.buffer.cursor_y(), height);
                 let x = rows[0].x
                     + 1
                     + self
                         .buffer
                         .cursor_column()
                         .min(rows[0].width.saturating_sub(2) as usize) as u16;
-                let y = rows[0].y
-                    + 1
-                    + self
-                        .buffer
-                        .cursor_y()
-                        .min(rows[0].height.saturating_sub(2) as usize)
-                        as u16;
+                let y = rows[0].y + 1 + visible_y as u16;
                 frame.set_cursor_position((x, y));
             })?;
 
@@ -142,7 +151,9 @@ impl Editor {
                     fs::write(&self.path, self.buffer.to_text())?;
                     return Ok(true);
                 }
-                "q!" => return Ok(true),
+                "q!" => {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "edit canceled"));
+                }
                 _ => {
                     self.command.clear();
                     self.mode = Mode::Text;
@@ -158,7 +169,7 @@ impl Editor {
     fn status(&self) -> String {
         match self.mode {
             Mode::Text if self.vim.mode() == VimMode::Normal => {
-                "NORMAL  i/a/o insert  h/j/k/l/w/b/e move  x/dd delete  yy/p paste  u/C-r undo  :wq save  :q! quit".to_owned()
+                "NORMAL  i/a/o insert  h/j/k/l/w/b/e move  x/dd delete  yy/p paste  u/C-r undo  :wq save  :q! cancel".to_owned()
             }
             Mode::Text => "INSERT  Esc normal".to_owned(),
             Mode::Command => format!(":{}", self.command),
@@ -178,7 +189,7 @@ mod tests {
     static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
-    fn q_bang_discards_buffer_changes() {
+    fn q_bang_cancels_and_discards_buffer_changes() {
         let (root, path) = temp_file("original\n");
         let mut editor = Editor::open(path.clone()).unwrap();
 
@@ -188,8 +199,9 @@ mod tests {
         editor.handle_key(key(':')).unwrap();
         editor.handle_key(key('q')).unwrap();
         assert!(editor.handle_key(key('!')).unwrap() == false);
-        assert!(editor.handle_key(enter()).unwrap());
+        let err = editor.handle_key(enter()).unwrap_err();
 
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
         assert_eq!(fs::read_to_string(path).unwrap(), "original\n");
         fs::remove_dir_all(root).unwrap();
     }

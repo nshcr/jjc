@@ -72,6 +72,8 @@ fn key_token(token: &str) -> Result<KeyEvent, String> {
         "Right" => Ok(key(KeyCode::Right)),
         "Up" => Ok(key(KeyCode::Up)),
         "Down" => Ok(key(KeyCode::Down)),
+        "PageUp" => Ok(key(KeyCode::PageUp)),
+        "PageDown" => Ok(key(KeyCode::PageDown)),
         "C-r" => Ok(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
         "C-h" => Ok(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL)),
         "C-w" => Ok(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)),
@@ -90,7 +92,7 @@ mod tests {
 
     #[test]
     fn parses_named_keys() {
-        let keys = parse_script("iHi<Esc>:wq<Enter><C-r>").unwrap();
-        assert_eq!(keys.len(), 9);
+        let keys = parse_script("iHi<Esc>:wq<Enter><C-r><PageDown><PageUp>").unwrap();
+        assert_eq!(keys.len(), 11);
     }
 }

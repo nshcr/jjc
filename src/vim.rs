@@ -181,6 +181,16 @@ impl Vim {
             KeyCode::Char('h') | KeyCode::Left => buffer.apply(EditCommand::MoveLeft),
             KeyCode::Char('j') | KeyCode::Down => buffer.apply(EditCommand::MoveDown),
             KeyCode::Char('k') | KeyCode::Up => buffer.apply(EditCommand::MoveUp),
+            KeyCode::PageDown => {
+                for _ in 0..10 {
+                    buffer.apply(EditCommand::MoveDown);
+                }
+            }
+            KeyCode::PageUp => {
+                for _ in 0..10 {
+                    buffer.apply(EditCommand::MoveUp);
+                }
+            }
             KeyCode::Char('l') | KeyCode::Right => buffer.apply(EditCommand::MoveRight),
             KeyCode::Char('0') => buffer.apply(EditCommand::MoveLineStart),
             KeyCode::Char('^') => buffer.apply(EditCommand::MoveFirstNonBlank),

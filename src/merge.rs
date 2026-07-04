@@ -12,11 +12,14 @@ use ratatui::layout::Direction;
 use ratatui::layout::Layout;
 use ratatui::text::Line;
 use ratatui::widgets::Block;
-use ratatui::widgets::Borders;
 use ratatui::widgets::Paragraph;
+use ratatui::widgets::Scrollbar;
+use ratatui::widgets::ScrollbarOrientation;
 
 use crate::buffer::TextBuffer;
 use crate::input;
+use crate::scroll::ViewScroll;
+use crate::scroll::scrollbar_area;
 use crate::vim::Vim;
 use crate::vim::VimMode;
 
@@ -56,6 +59,7 @@ pub struct MergeApp {
     mode: Mode,
     vim: Vim,
     command: String,
+    scroll: ViewScroll,
 }
 
 impl MergeApp {
@@ -97,6 +101,7 @@ impl MergeApp {
             mode: Mode::Text,
             vim: Vim::new(),
             command: String::new(),
+            scroll: ViewScroll::default(),
         })
     }
 
@@ -123,12 +128,23 @@ impl MergeApp {
                         right,
                         output,
                     } => {
-                        frame.render_widget(pane("left", left.lines()), columns[0]);
-                        frame.render_widget(pane("base", base.lines()), columns[1]);
-                        frame.render_widget(pane("right", right.lines()), columns[2]);
+                        let height = columns[3].height.saturating_sub(2) as usize;
+                        self.scroll
+                            .keep_visible(output.cursor_y(), output.lines().len(), height);
+                        let scroll = self.scroll.offset();
+                        let mut scrollbar_state =
+                            self.scroll.scrollbar_state(output.lines().len(), height);
+                        frame.render_widget(pane("left", left.lines(), scroll), columns[0]);
+                        frame.render_widget(pane("base", base.lines(), scroll), columns[1]);
+                        frame.render_widget(pane("right", right.lines(), scroll), columns[2]);
                         frame.render_widget(
-                            pane("output", output.lines().iter().map(String::as_str)),
+                            pane("output", output.lines().iter().map(String::as_str), scroll),
                             columns[3],
+                        );
+                        frame.render_stateful_widget(
+                            Scrollbar::new(ScrollbarOrientation::VerticalRight),
+                            scrollbar_area(columns[3]),
+                            &mut scrollbar_state,
                         );
                         let x = columns[3].x
                             + 1
@@ -138,10 +154,7 @@ impl MergeApp {
                                 as u16;
                         let y = columns[3].y
                             + 1
-                            + output
-                                .cursor_y()
-                                .min(columns[3].height.saturating_sub(2) as usize)
-                                as u16;
+                            + self.scroll.visible_line(output.cursor_y(), height) as u16;
                         frame.set_cursor_position((x, y));
                     }
                     MergeContent::Binary {
@@ -164,7 +177,7 @@ impl MergeApp {
                         );
                         frame.render_widget(
                             Paragraph::new("binary conflict\nmanual editing disabled")
-                                .block(Block::new().title("output").borders(Borders::ALL)),
+                                .block(Block::bordered().title("output")),
                             columns[3],
                         );
                     }
@@ -313,15 +326,16 @@ fn read_optional_text(path: &Path) -> io::Result<Option<String>> {
     }
 }
 
-fn pane<'a>(title: &'a str, lines: impl Iterator<Item = &'a str>) -> Paragraph<'a> {
-    Paragraph::new(lines.take(200).map(Line::from).collect::<Vec<_>>())
-        .block(Block::new().title(title).borders(Borders::ALL))
+fn pane<'a>(title: &'a str, lines: impl Iterator<Item = &'a str>, scroll: usize) -> Paragraph<'a> {
+    Paragraph::new(lines.map(Line::from).collect::<Vec<_>>())
+        .scroll((scroll as u16, 0))
+        .block(Block::bordered().title(title))
 }
 
 fn binary_pane<'a>(title: &'a str, bytes: &[u8], selected: bool) -> Paragraph<'a> {
     let marker = if selected { "selected" } else { "" };
     Paragraph::new(format!("binary\n{} bytes\n{marker}", bytes.len()))
-        .block(Block::new().title(title).borders(Borders::ALL))
+        .block(Block::bordered().title(title))
 }
 
 #[cfg(test)]
@@ -375,6 +389,7 @@ mod tests {
             mode: Mode::Text,
             vim: Vim::new(),
             command: String::new(),
+            scroll: ViewScroll::default(),
         };
 
         app.save().unwrap();
@@ -432,6 +447,7 @@ mod tests {
             mode: Mode::Text,
             vim: Vim::new(),
             command: String::new(),
+            scroll: ViewScroll::default(),
         }
     }
 

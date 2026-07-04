@@ -5,5 +5,6 @@ pub mod diff;
 pub mod editor;
 pub mod input;
 pub mod merge;
+pub mod scroll;
 pub mod syntax;
 pub mod vim;
