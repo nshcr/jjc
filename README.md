@@ -11,7 +11,8 @@ This is still early. The current build has a Vim-like built-in text editor,
 whole-hunk and line-level diff selection for UTF-8 files present on both sides,
 Rust function-aware diff grouping, simple three-way UTF-8 merge output editing,
 binary merge accept-side resolution, and an agent-ready structured edit command
-layer for the built-in text buffer.
+layer for the built-in text buffer. Edit, diff, and merge text views share
+Tree-sitter syntax highlighting.
 
 ## Install
 
@@ -50,6 +51,63 @@ jjc edit <file>
 jjc diff <left> <right> <output>
 jjc merge <left> <base> <right> <output> --marker-length <n> --path <repo-path>
 ```
+
+## Syntax highlighting
+
+Syntax highlighting is enabled by default in:
+
+- `jjc edit <file>`
+- `jjc diff <left> <right> <output>` hunk rows
+- diff mode manual output editing via `e`
+- `jjc merge <left> <base> <right> <output>` left/base/right/output panes
+
+Supported bundled Tree-sitter languages:
+
+- C: `.c`, `.h`
+- C++: `.cc`, `.cpp`, `.cxx`, `.hpp`, `.hh`, `.hxx`
+- Go: `.go`
+- JavaScript: `.js`, `.mjs`, `.cjs`
+- JSON: `.json`
+- Python: `.py`, `.pyw`
+- Rust: `.rs`
+- TypeScript: `.ts`, `.mts`, `.cts`
+- TSX/JSX: `.tsx`, `.jsx`
+
+Unsupported extensions fall back to plain text.
+
+## Configure jjc
+
+`jjc` reads configuration from `JJC_CONFIG` when set. Otherwise it checks
+`$XDG_CONFIG_HOME/jjc/config.toml`, then `$HOME/.config/jjc/config.toml`.
+Missing config files use defaults.
+
+```toml
+[syntax]
+enabled = true
+
+[theme.keyword]
+fg = "cyan"
+bold = true
+
+[theme.function]
+fg = "yellow"
+
+[theme.string]
+fg = "green"
+
+[theme.comment]
+fg = "dark-gray"
+dim = true
+
+[theme.number]
+fg = "magenta"
+
+[theme.type-name]
+fg = "blue"
+```
+
+Colors can be named terminal colors such as `cyan`, `yellow`, `green`,
+`magenta`, `blue`, `gray`, `dark-gray`, or `#rrggbb`.
 
 ## Keys
 
@@ -95,6 +153,9 @@ left/base/right, then `w` to write the selected side.
 - Merge mode supports ordinary UTF-8 three-way text conflicts and binary
   accept-side resolution. For delete/modify conflicts, it can keep the modified
   side.
+- Syntax highlighting is limited to bundled grammar crates; adding another
+  Tree-sitter language requires adding its grammar crate and language registry
+  entry.
 - The current external `jj` merge-tool protocol does not let `jjc` correctly
   express deletion as the merge result; `jj` also rejects some non-normal-file
   and unresolved executable-bit conflicts before invoking the external tool.

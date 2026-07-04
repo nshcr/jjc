@@ -118,9 +118,12 @@ Allowed early dependencies:
 - `similar` for text diff and hunk generation
 - current TUI stack: `ratatui` and `crossterm`
 
+Tree-sitter is now used for function-aware hunks and shared syntax
+highlighting. Keep grammar support explicit: each bundled language needs a
+grammar crate and one registry entry.
+
 Defer heavier dependencies until they unlock a concrete feature:
 
-- Tree-sitter: function-level hunks and language-aware selection
 - agent/runtime dependencies: commit-message assistance and later guided edits
 
 ## Architecture
@@ -281,18 +284,26 @@ Acceptance:
 - Smoke tests cover `jj describe`, diff editing, and text/binary merge paths.
 - `cargo test` passes.
 
-### M6: Tree-sitter function hunks
+### M6: Tree-sitter function hunks and syntax highlighting
 
 Scope:
 
-- Add Tree-sitter parsers only for languages that are personally useful first.
+- Add Tree-sitter parsers through an explicit language registry.
 - Group hunks by enclosing function when possible.
 - Fall back to line hunks for unknown languages or parse failures.
+- Highlight edit, diff, and merge text views through one shared renderer.
+- Add jjc config for enabling/disabling syntax highlighting and overriding
+  per-class theme styles.
 
 Acceptance:
 
 - A complete function can be selected as one logical hunk.
 - Parse failures never block line-based editing.
+- Rust, Python, Go, JavaScript, TypeScript/TSX, JSON, C, and C++ are supported
+  by bundled grammar crates.
+- `jjc edit`, `jjc diff`, and `jjc merge` all use the same configured
+  highlighter for recognized file extensions.
+- Non-Rust highlighting and theme parsing have focused unit tests.
 
 ### M7: Complex merge compatibility
 
