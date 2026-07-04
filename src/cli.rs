@@ -12,6 +12,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(about = "Check local jjc usability and print recommended jj config")]
+    Doctor,
     #[command(about = "Edit a single text file, used by jj ui.editor")]
     Edit { file: PathBuf },
     #[command(about = "Edit a jj diff using left/right/output directories")]
@@ -45,6 +47,13 @@ mod tests {
             Command::Edit { file } => assert_eq!(file, PathBuf::from("message.txt")),
             _ => panic!("expected edit command"),
         }
+    }
+
+    #[test]
+    fn parses_doctor_command() {
+        let cli = Cli::try_parse_from(["jjc", "doctor"]).unwrap();
+
+        assert!(matches!(cli.command, Command::Doctor));
     }
 
     #[test]

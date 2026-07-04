@@ -3,6 +3,7 @@ pub mod buffer;
 pub mod cli;
 pub mod config;
 pub mod diff;
+pub mod doctor;
 pub mod editor;
 pub mod input;
 pub mod merge;

@@ -1,6 +1,7 @@
 use std::io;
 use std::path::Path;
 
+use crossterm::cursor::SetCursorStyle;
 use crossterm::execute;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
@@ -11,12 +12,14 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::cli::Command;
 use crate::diff::DiffApp;
+use crate::doctor;
 use crate::editor::Editor;
 use crate::input;
 use crate::merge::MergeApp;
 
 pub fn run(command: Command) -> io::Result<()> {
     match command {
+        Command::Doctor => doctor::run(),
         Command::Edit { file } => {
             ensure_file(&file)?;
             let mut editor = Editor::open(file)?;
@@ -94,7 +97,11 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            SetCursorStyle::DefaultUserShape,
+            LeaveAlternateScreen
+        );
     }
 }
 
