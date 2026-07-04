@@ -1,5 +1,8 @@
+use std::io;
 use std::path::Path;
 
+use crossterm::cursor::SetCursorStyle;
+use crossterm::execute;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line;
@@ -8,6 +11,7 @@ use ratatui::text::Span;
 use crate::config::AppConfig;
 use crate::syntax;
 use crate::syntax::HighlightSpan;
+use crate::vim::VimMode;
 
 pub struct StyledText<'a> {
     lines: &'a [String],
@@ -70,6 +74,14 @@ pub fn string_lines(text: &str) -> Vec<String> {
     text.lines().map(str::to_owned).collect()
 }
 
+pub fn set_vim_cursor_style(writer: &mut impl io::Write, mode: VimMode) -> io::Result<()> {
+    let style = match mode {
+        VimMode::Normal => SetCursorStyle::SteadyBlock,
+        VimMode::Insert => SetCursorStyle::SteadyBar,
+    };
+    execute!(writer, style)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +117,15 @@ mod tests {
         let line = StyledText::new(Path::new("COMMIT_EDITMSG"), &lines, &config).lines()[0].clone();
 
         assert!(line.spans[0].style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn vim_cursor_style_follows_mode() {
+        let mut output = Vec::new();
+
+        set_vim_cursor_style(&mut output, VimMode::Normal).unwrap();
+        set_vim_cursor_style(&mut output, VimMode::Insert).unwrap();
+
+        assert_eq!(output, b"\x1b[2 q\x1b[6 q");
     }
 }

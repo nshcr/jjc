@@ -50,6 +50,22 @@ fn edit_tty_scrolls_to_long_file_cursor() -> io::Result<()> {
 }
 
 #[test]
+fn edit_tty_cursor_style_follows_vim_mode() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let message = root.join("message.txt");
+    let log = root.join("tty.log");
+    fs::write(&message, "message\n")?;
+
+    expect_cursor_style_switch(&log, jjc(), &[s("edit"), path_arg(&message)])?;
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn diff_tty_scrolls_inside_long_hunk() -> io::Result<()> {
     if !expect_available() {
         return Ok(());
@@ -314,6 +330,22 @@ fn jj_split_tty_undo_redo_preserves_selection_state() -> io::Result<()> {
     assert_alt_screen_log(&log)?;
     assert_eq!(file_show(&repo, "@-", "file.txt")?, second_hunk_selected());
     fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn expect_cursor_style_switch(log: &Path, program: &str, args: &[String]) -> io::Result<()> {
+    let script = format!(
+        "log_file -noappend {}\nset timeout 10\nspawn {} {}\nexpect \"\\033\\[?1049h\"\nexpect \"\\033\\[2 q\"\nsend -- i\nexpect \"\\033\\[6 q\"\nsend -- \"\\033\"\nexpect \"\\033\\[2 q\"\nsend -- :wq\\r\nexpect \"\\033\\[?1049l\"\nexpect eof\nset wait_result [wait]\nexit [lindex $wait_result 3]\n",
+        tcl_word(&path_arg(log)),
+        tcl_word(program),
+        args.iter()
+            .map(|arg| tcl_word(arg))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let output = Command::new("expect").arg("-c").arg(script).output()?;
+    assert_success(output);
+    assert_alt_screen_log(log)?;
     Ok(())
 }
 

@@ -128,6 +128,14 @@ impl Vim {
                     self.case_range(buffer, buffer.current_line_range(), CaseChange::Toggle);
                     true
                 }
+                Pending::Operator(operator) if code == KeyCode::Char('i') => {
+                    self.pending = Some(Pending::TextObject { operator });
+                    true
+                }
+                Pending::TextObject { operator } if code == KeyCode::Char('w') => buffer
+                    .range_inner_word()
+                    .is_some_and(|range| self.apply_operator_range(buffer, operator, range)),
+                Pending::TextObject { .. } => false,
                 Pending::Operator(operator) => self.apply_operator_motion(buffer, operator, code),
                 Pending::G => self.handle_normal(buffer, key),
                 Pending::Find(kind) => match code {
@@ -202,6 +210,7 @@ impl Vim {
             KeyCode::Char('W') => buffer.apply(EditCommand::MoveBigWordForward),
             KeyCode::Char('B') => buffer.apply(EditCommand::MoveBigWordBackward),
             KeyCode::Char('E') => buffer.apply(EditCommand::MoveBigWordEnd),
+            KeyCode::Char('%') => return self.match_pair(buffer),
             KeyCode::Char('f') => self.pending = Some(Pending::Find(FindKind::ForwardOn)),
             KeyCode::Char('F') => self.pending = Some(Pending::Find(FindKind::BackwardOn)),
             KeyCode::Char('t') => self.pending = Some(Pending::Find(FindKind::ForwardBefore)),
@@ -376,6 +385,15 @@ impl Vim {
         self.apply_find(buffer, motion);
     }
 
+    fn match_pair(&mut self, buffer: &mut TextBuffer) -> bool {
+        let Some(column) = matching_bracket_column(buffer.current_line(), buffer.cursor_column())
+        else {
+            return false;
+        };
+        buffer.move_to_char_column(column);
+        true
+    }
+
     fn range_for_find(&mut self, buffer: &TextBuffer, motion: FindMotion) -> Option<BufferRange> {
         let column = find_column(buffer.current_line(), buffer.cursor_column(), motion)?;
         self.last_find = Some(motion);
@@ -473,6 +491,7 @@ enum CaseChange {
 enum Pending {
     Operator(Operator),
     OperatorFind { operator: Operator, kind: FindKind },
+    TextObject { operator: Operator },
     G,
     Find(FindKind),
     Replace,
@@ -542,6 +561,51 @@ fn find_column(line: &str, cursor_column: usize, motion: FindMotion) -> Option<u
             .rev()
             .find(|&i| chars[i] == motion.target)
             .map(|i| (i + 1).min(len.saturating_sub(1))),
+    }
+}
+
+fn matching_bracket_column(line: &str, cursor_column: usize) -> Option<usize> {
+    let chars = line.chars().collect::<Vec<_>>();
+    let bracket_column =
+        (cursor_column..chars.len()).find(|&index| bracket(chars[index]).is_some())?;
+    let (matching, forward) = bracket(chars[bracket_column])?;
+    let mut depth = 0usize;
+
+    if forward {
+        for (index, c) in chars.iter().enumerate().skip(bracket_column) {
+            if *c == chars[bracket_column] {
+                depth += 1;
+            } else if *c == matching {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+        }
+    } else {
+        for (index, c) in chars.iter().enumerate().take(bracket_column + 1).rev() {
+            if *c == chars[bracket_column] {
+                depth += 1;
+            } else if *c == matching {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn bracket(c: char) -> Option<(char, bool)> {
+    match c {
+        '(' => Some((')', true)),
+        '[' => Some((']', true)),
+        '{' => Some(('}', true)),
+        ')' => Some(('(', false)),
+        ']' => Some(('[', false)),
+        '}' => Some(('{', false)),
+        _ => None,
     }
 }
 
@@ -792,6 +856,54 @@ mod tests {
         vim.handle_key(&mut buffer, key('r'));
         vim.handle_key(&mut buffer, key('?'));
         assert_eq!(buffer.to_text(), "abc def gh? \n");
+    }
+
+    #[test]
+    fn percent_matches_brackets_on_current_line() {
+        let mut vim = Vim::new();
+        let mut buffer = TextBuffer::from_text("(abc)\n");
+
+        vim.handle_key(&mut buffer, key('%'));
+        vim.handle_key(&mut buffer, key('r'));
+        vim.handle_key(&mut buffer, key('X'));
+        assert_eq!(buffer.to_text(), "(abcX\n");
+
+        let mut vim = Vim::new();
+        let mut buffer = TextBuffer::from_text("(abc)\n");
+        vim.handle_key(&mut buffer, key('$'));
+        vim.handle_key(&mut buffer, key('%'));
+        vim.handle_key(&mut buffer, key('r'));
+        vim.handle_key(&mut buffer, key('Y'));
+        assert_eq!(buffer.to_text(), "Yabc)\n");
+    }
+
+    #[test]
+    fn inner_word_text_objects_cover_delete_change_and_yank() {
+        let mut vim = Vim::new();
+        let mut buffer = TextBuffer::from_text("one two\n");
+        vim.handle_key(&mut buffer, key('d'));
+        vim.handle_key(&mut buffer, key('i'));
+        vim.handle_key(&mut buffer, key('w'));
+        assert_eq!(buffer.to_text(), " two\n");
+
+        let mut vim = Vim::new();
+        let mut buffer = TextBuffer::from_text("éclair two\n");
+        vim.handle_key(&mut buffer, key('c'));
+        vim.handle_key(&mut buffer, key('i'));
+        vim.handle_key(&mut buffer, key('w'));
+        vim.handle_key(&mut buffer, key('x'));
+        vim.handle_key(&mut buffer, esc());
+        assert_eq!(buffer.to_text(), "x two\n");
+
+        let mut vim = Vim::new();
+        let mut buffer = TextBuffer::from_text("one two\n");
+        vim.handle_key(&mut buffer, key('w'));
+        vim.handle_key(&mut buffer, key('y'));
+        vim.handle_key(&mut buffer, key('i'));
+        vim.handle_key(&mut buffer, key('w'));
+        vim.handle_key(&mut buffer, key('$'));
+        vim.handle_key(&mut buffer, key('p'));
+        assert_eq!(buffer.to_text(), "one twotwo\n");
     }
 
     #[test]

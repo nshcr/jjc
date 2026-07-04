@@ -20,6 +20,7 @@ use crate::buffer::TextBuffer;
 use crate::config::AppConfig;
 use crate::input;
 use crate::render::StyledText;
+use crate::render::set_vim_cursor_style;
 use crate::scroll::ViewScroll;
 use crate::scroll::scrollbar_area;
 use crate::vim::Vim;
@@ -37,6 +38,7 @@ pub struct Editor {
     mode: Mode,
     vim: Vim,
     command: String,
+    pending_empty_save: bool,
     scroll: ViewScroll,
     config: AppConfig,
 }
@@ -50,6 +52,7 @@ impl Editor {
             mode: Mode::Text,
             vim: Vim::new(),
             command: String::new(),
+            pending_empty_save: false,
             scroll: ViewScroll::default(),
             config: AppConfig::load()?,
         })
@@ -57,6 +60,7 @@ impl Editor {
 
     pub fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
         loop {
+            set_vim_cursor_style(terminal.backend_mut(), self.cursor_mode())?;
             terminal.draw(|frame| {
                 let rows = Layout::default()
                     .direction(Direction::Vertical)
@@ -120,7 +124,9 @@ impl Editor {
                     self.command.clear();
                     return Ok(false);
                 }
-                self.vim.handle_key(&mut self.buffer, key);
+                if self.vim.handle_key(&mut self.buffer, key) {
+                    self.pending_empty_save = false;
+                }
                 Ok(false)
             }
             Mode::Command => self.handle_command(key),
@@ -137,10 +143,7 @@ impl Editor {
                 self.command.pop();
             }
             KeyCode::Enter => match self.command.as_str() {
-                "wq" => {
-                    fs::write(&self.path, self.buffer.to_text())?;
-                    return Ok(true);
-                }
+                "wq" => return self.save(),
                 "q!" => {
                     return Err(io::Error::new(io::ErrorKind::Interrupted, "edit canceled"));
                 }
@@ -159,6 +162,9 @@ impl Editor {
     fn status(&self) -> String {
         match self.mode {
             Mode::Text if self.vim.mode() == VimMode::Normal => {
+                if self.pending_empty_save {
+                    return "EMPTY MESSAGE  edit content or :wq again to save anyway".to_owned();
+                }
                 "NORMAL  i/a/o insert  h/j/k/l/w/b/e move  x/dd delete  yy/p paste  u/C-r undo  :wq save  :q! cancel".to_owned()
             }
             Mode::Text => "INSERT  Esc normal".to_owned(),
@@ -166,8 +172,34 @@ impl Editor {
         }
     }
 
+    fn cursor_mode(&self) -> VimMode {
+        match self.mode {
+            Mode::Text => self.vim.mode(),
+            Mode::Command => VimMode::Normal,
+        }
+    }
+
     fn render_text(&self) -> Vec<Line<'static>> {
         StyledText::new(&self.path, self.buffer.lines(), &self.config).lines()
+    }
+
+    fn save(&mut self) -> io::Result<bool> {
+        if self.message_is_empty() && !self.pending_empty_save {
+            self.pending_empty_save = true;
+            self.mode = Mode::Text;
+            self.vim.set_normal();
+            return Ok(false);
+        }
+        fs::write(&self.path, self.buffer.to_text())?;
+        Ok(true)
+    }
+
+    fn message_is_empty(&self) -> bool {
+        self.buffer
+            .lines()
+            .iter()
+            .filter(|line| !line.starts_with("JJ:"))
+            .all(|line| line.trim().is_empty())
     }
 }
 
@@ -212,6 +244,26 @@ mod tests {
         assert!(editor.handle_key(enter()).unwrap());
 
         assert_eq!(fs::read_to_string(path).unwrap(), content);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wq_warns_before_saving_empty_message() {
+        let (root, path) = temp_file("\nJJ: comment\n");
+        let mut editor = Editor::open(path.clone()).unwrap();
+
+        editor.handle_key(key(':')).unwrap();
+        editor.handle_key(key('w')).unwrap();
+        editor.handle_key(key('q')).unwrap();
+        assert!(!editor.handle_key(enter()).unwrap());
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "\nJJ: comment\n");
+        assert!(editor.status().contains("EMPTY MESSAGE"));
+
+        editor.handle_key(key(':')).unwrap();
+        editor.handle_key(key('w')).unwrap();
+        editor.handle_key(key('q')).unwrap();
+        assert!(editor.handle_key(enter()).unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 

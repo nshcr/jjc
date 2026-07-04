@@ -155,6 +155,11 @@ impl TextBuffer {
         self.cursor_y
     }
 
+    pub fn move_to_line(&mut self, line: usize) {
+        self.cursor_y = line.min(self.lines.len() - 1);
+        self.clamp_cursor();
+    }
+
     pub fn current_line(&self) -> &str {
         &self.lines[self.cursor_y]
     }
@@ -212,6 +217,16 @@ impl TextBuffer {
         )
     }
 
+    pub fn range_inner_word(&self) -> Option<BufferRange> {
+        let line = &self.lines[self.cursor_y];
+        let (start, end) = word_span_at_or_after(line, self.cursor_x)?;
+        Some(BufferRange::Char {
+            line: self.cursor_y,
+            start,
+            end,
+        })
+    }
+
     pub fn range_text(&self, range: BufferRange) -> String {
         match range {
             BufferRange::Char { line, start, end } => self.lines[line][start..end].to_owned(),
@@ -232,6 +247,17 @@ impl TextBuffer {
                 self.delete_line();
             }
         }
+    }
+
+    pub fn replace_lines(&mut self, start: usize, end: usize, replacement: &[String]) {
+        let start = start.min(self.lines.len());
+        let end = end.min(self.lines.len()).max(start);
+        self.lines.splice(start..end, replacement.iter().cloned());
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.cursor_y = start.min(self.lines.len() - 1);
+        self.cursor_x = 0;
     }
 
     pub fn lowercase_range(&mut self, range: BufferRange) {
@@ -633,6 +659,23 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+fn word_span_at_or_after(line: &str, cursor: usize) -> Option<(usize, usize)> {
+    let mut start = None;
+    for (index, c) in line
+        .char_indices()
+        .chain(std::iter::once((line.len(), ' ')))
+    {
+        if is_word(c) {
+            start.get_or_insert(index);
+        } else if let Some(word_start) = start.take() {
+            if cursor <= index {
+                return Some((word_start, index));
+            }
+        }
+    }
+    None
+}
+
 fn next_word_start(line: &str, cursor: usize) -> Option<usize> {
     let mut seen_non_word = false;
     for (index, c) in line.char_indices().filter(|(index, _)| *index > cursor) {
@@ -807,5 +850,15 @@ mod tests {
         buffer.apply(suggestion.into_command());
 
         assert_eq!(buffer.to_text(), "new\n");
+    }
+
+    #[test]
+    fn replaces_line_range_and_moves_cursor_to_replacement() {
+        let mut buffer = TextBuffer::from_text("a\n<<<<<<<\nleft\n=======\nright\n>>>>>>>\nz\n");
+
+        buffer.replace_lines(1, 6, &["left".to_owned()]);
+
+        assert_eq!(buffer.to_text(), "a\nleft\nz\n");
+        assert_eq!(buffer.cursor_y(), 1);
     }
 }
