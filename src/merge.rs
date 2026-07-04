@@ -20,6 +20,7 @@ use crate::buffer::TextBuffer;
 use crate::config::AppConfig;
 use crate::input;
 use crate::render::StyledText;
+use crate::render::set_vim_cursor_style;
 use crate::render::string_lines;
 use crate::scroll::ViewScroll;
 use crate::scroll::scrollbar_area;
@@ -62,8 +63,17 @@ pub struct MergeApp {
     mode: Mode,
     vim: Vim,
     command: String,
+    pending_marker_save: bool,
     scroll: ViewScroll,
     config: AppConfig,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ConflictBlock {
+    start: usize,
+    base_marker: Option<usize>,
+    separator: usize,
+    end: usize,
 }
 
 impl MergeApp {
@@ -105,6 +115,7 @@ impl MergeApp {
             mode: Mode::Text,
             vim: Vim::new(),
             command: String::new(),
+            pending_marker_save: false,
             scroll: ViewScroll::default(),
             config: AppConfig::load()?,
         })
@@ -112,6 +123,7 @@ impl MergeApp {
 
     pub fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
         loop {
+            set_vim_cursor_style(terminal.backend_mut(), self.cursor_mode())?;
             terminal.draw(|frame| {
                 let rows = Layout::default()
                     .direction(Direction::Vertical)
@@ -239,9 +251,35 @@ impl MergeApp {
                 self.command.clear();
                 return Ok(false);
             }
+            if self.vim.mode() == VimMode::Normal {
+                match key.code {
+                    KeyCode::Char('n') => {
+                        self.jump_conflict(1);
+                        return Ok(false);
+                    }
+                    KeyCode::Char('p') => {
+                        self.jump_conflict(-1);
+                        return Ok(false);
+                    }
+                    KeyCode::Char('1') => {
+                        self.accept_side(Side::Left);
+                        return Ok(false);
+                    }
+                    KeyCode::Char('2') => {
+                        self.accept_side(Side::Base);
+                        return Ok(false);
+                    }
+                    KeyCode::Char('3') => {
+                        self.accept_side(Side::Right);
+                        return Ok(false);
+                    }
+                    _ => {}
+                }
+            }
             if let MergeContent::Text { output, .. } = &mut self.content
                 && self.vim.handle_key(output, key)
             {
+                self.pending_marker_save = false;
                 return Ok(false);
             }
         }
@@ -251,8 +289,7 @@ impl MergeApp {
             KeyCode::Char('2') => self.accept_side(Side::Base),
             KeyCode::Char('3') => self.accept_side(Side::Right),
             KeyCode::Char('w') => {
-                self.save()?;
-                return Ok(true);
+                return self.save();
             }
             KeyCode::Char('q') => {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "merge canceled"));
@@ -273,8 +310,7 @@ impl MergeApp {
             }
             KeyCode::Enter => match self.command.as_str() {
                 "wq" => {
-                    self.save()?;
-                    return Ok(true);
+                    return self.save();
                 }
                 "q!" => return Err(io::Error::new(io::ErrorKind::Interrupted, "merge canceled")),
                 _ => {
@@ -295,12 +331,32 @@ impl MergeApp {
                 "{}  marker-length={}  BINARY  1 left  2 base  3 right  w save  q cancel",
                 self.path, self.marker_length
             ),
+            (MergeContent::Text { output, .. }, _) if self.pending_marker_save => format!(
+                "{}  conflict markers remain; save again to write anyway",
+                self.path
+            ),
+            (MergeContent::Text { output, .. }, Mode::Text)
+                if conflict_blocks(output.lines()).len() == 1
+                    && self.vim.mode() == VimMode::Normal =>
+            {
+                format!(
+                    "{}  marker-length={}  NORMAL  n/p conflict  1 left  2 base  3 right  :wq save  q cancel",
+                    self.path, self.marker_length
+                )
+            }
             (_, Mode::Text) if self.vim.mode() == VimMode::Normal => format!(
-                "{}  marker-length={}  NORMAL  1 left  2 base  3 right  i/a/o edit  :wq save  q cancel",
+                "{}  marker-length={}  NORMAL  n/p conflict  1 left  2 base  3 right  i/a/o edit  :wq save  q cancel",
                 self.path, self.marker_length
             ),
             (_, Mode::Text) => format!("{}  INSERT  Esc normal", self.path),
             (_, Mode::Command) => format!(":{}", self.command),
+        }
+    }
+
+    fn cursor_mode(&self) -> VimMode {
+        match self.mode {
+            Mode::Text => self.vim.mode(),
+            Mode::Command => VimMode::Normal,
         }
     }
 
@@ -311,31 +367,70 @@ impl MergeApp {
                 base,
                 right,
                 output,
-            } => output.set_text(match side {
-                Side::Left => left,
-                Side::Base => base,
-                Side::Right => right,
-            }),
+            } => {
+                self.pending_marker_save = false;
+                if !accept_current_conflict_block(output, side) {
+                    output.set_text(match side {
+                        Side::Left => left,
+                        Side::Base => base,
+                        Side::Right => right,
+                    });
+                }
+            }
             MergeContent::Binary { selected, .. } => *selected = side,
         }
     }
 
-    fn save(&self) -> io::Result<()> {
+    fn jump_conflict(&mut self, delta: isize) {
+        let MergeContent::Text { output, .. } = &mut self.content else {
+            return;
+        };
+        let blocks = conflict_blocks(output.lines());
+        if blocks.is_empty() {
+            return;
+        }
+        let cursor = output.cursor_y();
+        let target = if delta >= 0 {
+            blocks
+                .iter()
+                .find(|block| block.start > cursor)
+                .unwrap_or(&blocks[0])
+        } else {
+            blocks
+                .iter()
+                .rev()
+                .find(|block| block.start < cursor)
+                .unwrap_or_else(|| blocks.last().unwrap())
+        };
+        output.move_to_line(target.start);
+    }
+
+    fn save(&mut self) -> io::Result<bool> {
         match &self.content {
-            MergeContent::Text { output, .. } => fs::write(&self.output, output.to_text()),
+            MergeContent::Text { output, .. } => {
+                if has_conflict_markers(output.lines()) && !self.pending_marker_save {
+                    self.pending_marker_save = true;
+                    return Ok(false);
+                }
+                fs::write(&self.output, output.to_text())?;
+                Ok(true)
+            }
             MergeContent::Binary {
                 left,
                 base,
                 right,
                 selected,
-            } => fs::write(
-                &self.output,
-                match selected {
-                    Side::Left => left,
-                    Side::Base => base,
-                    Side::Right => right,
-                },
-            ),
+            } => {
+                fs::write(
+                    &self.output,
+                    match selected {
+                        Side::Left => left,
+                        Side::Base => base,
+                        Side::Right => right,
+                    },
+                )?;
+                Ok(true)
+            }
         }
     }
 
@@ -368,6 +463,75 @@ fn binary_pane(title: &str, bytes: &[u8], selected: bool) -> Paragraph<'static> 
         .block(Block::bordered().title(title.to_owned()))
 }
 
+fn accept_current_conflict_block(output: &mut TextBuffer, side: Side) -> bool {
+    let Some(block) = current_conflict_block(output.lines(), output.cursor_y()) else {
+        return false;
+    };
+    let replacement = match side {
+        Side::Left => {
+            output.lines()[block.start + 1..block.base_marker.unwrap_or(block.separator)].to_vec()
+        }
+        Side::Base => {
+            let Some(base_marker) = block.base_marker else {
+                return false;
+            };
+            output.lines()[base_marker + 1..block.separator].to_vec()
+        }
+        Side::Right => output.lines()[block.separator + 1..block.end].to_vec(),
+    };
+    output.replace_lines(block.start, block.end + 1, &replacement);
+    true
+}
+
+fn current_conflict_block(lines: &[String], cursor: usize) -> Option<ConflictBlock> {
+    conflict_blocks(lines)
+        .into_iter()
+        .find(|block| block.start <= cursor && cursor <= block.end)
+        .or_else(|| conflict_blocks(lines).into_iter().next())
+}
+
+fn has_conflict_markers(lines: &[String]) -> bool {
+    !conflict_blocks(lines).is_empty()
+}
+
+fn conflict_blocks(lines: &[String]) -> Vec<ConflictBlock> {
+    let mut blocks = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        if !lines[index].starts_with("<<<<<<<") {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut base_marker = None;
+        let mut separator = None;
+        let mut end = None;
+        index += 1;
+        while index < lines.len() {
+            let line = &lines[index];
+            if line.starts_with("|||||||") {
+                base_marker = Some(index);
+            } else if line.starts_with("=======") {
+                separator = Some(index);
+            } else if line.starts_with(">>>>>>>") {
+                end = Some(index);
+                break;
+            }
+            index += 1;
+        }
+        if let (Some(separator), Some(end)) = (separator, end) {
+            blocks.push(ConflictBlock {
+                start,
+                base_marker,
+                separator,
+                end,
+            });
+        }
+        index += 1;
+    }
+    blocks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,7 +550,7 @@ mod tests {
             output.set_text("manual\n");
         }
 
-        app.save().unwrap();
+        assert!(app.save().unwrap());
 
         assert_eq!(fs::read_to_string(output).unwrap(), "manual\n");
         fs::remove_dir_all(root).unwrap();
@@ -397,7 +561,7 @@ mod tests {
         let (root, output) = temp_output();
         let mut app = app(output.clone());
         app.accept_side(Side::Right);
-        app.save().unwrap();
+        assert!(app.save().unwrap());
 
         assert_eq!(fs::read_to_string(output).unwrap(), "right\n");
         fs::remove_dir_all(root).unwrap();
@@ -406,7 +570,7 @@ mod tests {
     #[test]
     fn binary_accept_side_writes_bytes() {
         let (root, output) = temp_output();
-        let app = MergeApp {
+        let mut app = MergeApp {
             content: MergeContent::Binary {
                 left: vec![0, 1],
                 base: vec![2, 3],
@@ -419,11 +583,12 @@ mod tests {
             mode: Mode::Text,
             vim: Vim::new(),
             command: String::new(),
+            pending_marker_save: false,
             scroll: ViewScroll::default(),
             config: AppConfig::default(),
         };
 
-        app.save().unwrap();
+        assert!(app.save().unwrap());
 
         assert_eq!(fs::read(output).unwrap(), vec![0, 1]);
         fs::remove_dir_all(root).unwrap();
@@ -489,6 +654,47 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn accepts_current_conflict_block_side() {
+        let (root, output_path) = temp_output();
+        let mut app = app(output_path);
+        if let MergeContent::Text { output, .. } = &mut app.content {
+            output.set_text(
+                "before\n<<<<<<< left\nleft\n||||||| base\nbase\n=======\nright\n>>>>>>> right\nafter\n",
+            );
+            output.move_to_line(2);
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE))
+            .unwrap();
+
+        if let MergeContent::Text { output, .. } = &app.content {
+            assert_eq!(output.to_text(), "before\nright\nafter\n");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn save_warns_once_when_conflict_markers_remain() {
+        let (root, output_path) = temp_output();
+        fs::write(&output_path, "original\n").unwrap();
+        let mut app = app(output_path.clone());
+        if let MergeContent::Text { output, .. } = &mut app.content {
+            output.set_text("<<<<<<< left\nleft\n=======\nright\n>>>>>>> right\n");
+        }
+
+        assert!(!app.save().unwrap());
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "original\n");
+        assert!(app.pending_marker_save);
+        assert!(app.save().unwrap());
+        assert!(
+            fs::read_to_string(&output_path)
+                .unwrap()
+                .contains("<<<<<<<")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn app(output: PathBuf) -> MergeApp {
         MergeApp {
             content: MergeContent::Text {
@@ -503,6 +709,7 @@ mod tests {
             mode: Mode::Text,
             vim: Vim::new(),
             command: String::new(),
+            pending_marker_save: false,
             scroll: ViewScroll::default(),
             config: AppConfig::default(),
         }
