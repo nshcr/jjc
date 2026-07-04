@@ -59,6 +59,30 @@ fn jj_describe_q_bang_cancels_edit() -> io::Result<()> {
 }
 
 #[test]
+fn jj_describe_empty_message_warns_before_save() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("describe-empty-warning")?;
+
+    let output = jj(&repo)
+        .env("JJC_KEYS", ":wq<Enter>:q!<Enter>")
+        .arg("--config")
+        .arg(format!("ui.editor=[{},\"edit\"]", toml_string(jjc())))
+        .arg("describe")
+        .arg("--editor")
+        .output()?;
+    assert!(!output.status.success());
+
+    let output = jj(&repo)
+        .args(["log", "-r", "@", "--no-graph", "-T", "description"])
+        .output()?;
+    assert_success_ref(&output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    Ok(())
+}
+
+#[test]
 fn jj_restore_uses_jjc_diff_editor() -> io::Result<()> {
     if !jj_available() {
         return Ok(());
@@ -180,6 +204,108 @@ fn jj_split_can_select_deleted_line_with_jjc() -> io::Result<()> {
         .output()?;
     assert_success_ref(&output);
     assert_eq!(String::from_utf8_lossy(&output.stdout), "a\nc\n");
+    Ok(())
+}
+
+#[test]
+fn jj_split_can_select_added_file_with_jjc() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("added-file-split")?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+    assert_success(jj(&repo).args(["new", "-m", "work"]).output()?);
+    fs::write(repo.join("added.txt"), "new\n")?;
+
+    let output = jj(&repo)
+        .env("JJC_KEYS", "w")
+        .args(diff_editor_config())
+        .args(["split", "--tool", "jjc", "-m", "selected"])
+        .output()?;
+    assert_success(output);
+
+    let output = jj(&repo)
+        .args(["file", "show", "-r", "@-", "added.txt"])
+        .output()?;
+    assert_success_ref(&output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "new\n");
+    Ok(())
+}
+
+#[test]
+fn jj_split_can_unselect_current_file_with_jjc() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("file-select-split")?;
+    fs::write(repo.join("a.txt"), "old-a\n")?;
+    fs::write(repo.join("b.txt"), "old-b\n")?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+    assert_success(jj(&repo).args(["new", "-m", "work"]).output()?);
+    fs::write(repo.join("a.txt"), "new-a\n")?;
+    fs::write(repo.join("b.txt"), "new-b\n")?;
+
+    let output = jj(&repo)
+        .env("JJC_KEYS", "]Dw")
+        .args(diff_editor_config())
+        .args(["split", "--tool", "jjc", "-m", "selected"])
+        .output()?;
+    assert_success(output);
+
+    let output = jj(&repo)
+        .args(["file", "show", "-r", "@-", "a.txt"])
+        .output()?;
+    assert_success_ref(&output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "new-a\n");
+    let output = jj(&repo)
+        .args(["file", "show", "-r", "@-", "b.txt"])
+        .output()?;
+    assert_success_ref(&output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "old-b\n");
+    Ok(())
+}
+
+#[test]
+fn jj_restore_can_restore_deleted_file_with_jjc() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("deleted-file-restore")?;
+    fs::write(repo.join("file.txt"), "old\n")?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+    assert_success(jj(&repo).args(["new", "-m", "work"]).output()?);
+    fs::remove_file(repo.join("file.txt"))?;
+
+    let output = jj(&repo)
+        .env("JJC_KEYS", "w")
+        .args(diff_editor_config())
+        .args(["restore", "-i", "--tool", "jjc"])
+        .output()?;
+    assert_success(output);
+
+    assert_eq!(fs::read_to_string(repo.join("file.txt"))?, "old\n");
+    Ok(())
+}
+
+#[test]
+fn jj_restore_can_restore_binary_file_with_jjc() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("binary-file-restore")?;
+    fs::write(repo.join("file.bin"), [0, 1])?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+    assert_success(jj(&repo).args(["new", "-m", "work"]).output()?);
+    fs::write(repo.join("file.bin"), [0xff, 2])?;
+
+    let output = jj(&repo)
+        .env("JJC_KEYS", "w")
+        .args(diff_editor_config())
+        .args(["restore", "-i", "--tool", "jjc"])
+        .output()?;
+    assert_success(output);
+
+    assert_eq!(fs::read(repo.join("file.bin"))?, vec![0, 1]);
     Ok(())
 }
 
