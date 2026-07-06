@@ -223,6 +223,26 @@ fn jj_squash_interactive_uses_diff_editor_tty() -> io::Result<()> {
 }
 
 #[test]
+fn jj_resolve_uses_merge_editor_tty() -> io::Result<()> {
+    if !expect_available() || !jj_available() {
+        return Ok(());
+    }
+    let (root, repo) = conflict_repo("resolve-tty")?;
+    let log = root.join("tty.log");
+
+    expect_alt_screen(
+        &log,
+        "jj",
+        &jj_merge_args(&repo, ["resolve", "--tool", "jjc", "root:file.txt"]),
+        "3:wq\r",
+    )?;
+
+    assert_eq!(fs::read_to_string(repo.join("file.txt"))?, "right\n");
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn jj_split_tty_can_unselect_one_whole_hunk() -> io::Result<()> {
     if !expect_available() || !jj_available() {
         return Ok(());
@@ -401,6 +421,25 @@ fn function_hunk_repo(name: &str) -> io::Result<(PathBuf, PathBuf)> {
     Ok((root, repo))
 }
 
+fn conflict_repo(name: &str) -> io::Result<(PathBuf, PathBuf)> {
+    let root = temp_root()?;
+    let repo = init_repo(&root, name)?;
+    fs::write(repo.join("file.txt"), "base\n")?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+    assert_success(jj(&repo).args(["new", "-m", "left"]).output()?);
+    fs::write(repo.join("file.txt"), "left\n")?;
+    let left = rev(&repo)?;
+    assert_success(jj(&repo).args(["new", "@-", "-m", "right"]).output()?);
+    fs::write(repo.join("file.txt"), "right\n")?;
+    let right = rev(&repo)?;
+    assert_success(
+        jj(&repo)
+            .args(["new", &left, &right, "-m", "merge"])
+            .output()?,
+    );
+    Ok((root, repo))
+}
+
 fn init_repo(root: &Path, name: &str) -> io::Result<PathBuf> {
     let repo = root.join(name);
     assert_success(
@@ -429,6 +468,24 @@ fn jj_args<const N: usize>(repo: &Path, tail: [&str; N]) -> Vec<String> {
         format!("merge-tools.jjc.program={}", toml_string(jjc())),
         s("--config"),
         s("merge-tools.jjc.edit-args=[\"diff\",\"$left\",\"$right\",\"$output\"]"),
+    ];
+    args.extend(tail.into_iter().map(s));
+    args
+}
+
+fn jj_merge_args<const N: usize>(repo: &Path, tail: [&str; N]) -> Vec<String> {
+    let mut args = vec![
+        s("--no-pager"),
+        s("-R"),
+        path_arg(repo),
+        s("--config"),
+        s("ui.merge-editor=\"jjc\""),
+        s("--config"),
+        format!("merge-tools.jjc.program={}", toml_string(jjc())),
+        s("--config"),
+        s(
+            "merge-tools.jjc.merge-args=[\"merge\",\"$left\",\"$base\",\"$right\",\"$output\",\"--marker-length\",\"$marker_length\",\"--path\",\"$path\"]",
+        ),
     ];
     args.extend(tail.into_iter().map(s));
     args
@@ -480,6 +537,14 @@ fn file_show(repo: &Path, rev: &str, path: &str) -> io::Result<String> {
     let output = jj(repo).args(["file", "show", "-r", rev, path]).output()?;
     assert_success_ref(&output);
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn rev(repo: &Path) -> io::Result<String> {
+    let output = jj(repo)
+        .args(["log", "-r", "@", "--no-graph", "-T", "change_id.short()"])
+        .output()?;
+    assert_success_ref(&output);
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 fn assert_success_ref(output: &Output) {

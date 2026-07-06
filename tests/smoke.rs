@@ -344,6 +344,28 @@ fn jj_resolve_uses_jjc_merge_editor() -> io::Result<()> {
 }
 
 #[test]
+fn jj_resolve_without_path_invokes_jjc_for_each_conflict() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = multi_conflict_repo("resolve-multiple")?;
+
+    let output = jj(&repo)
+        .env("JJC_KEYS", "3:wq<Enter>")
+        .args(merge_editor_config())
+        .args(["resolve", "--tool", "jjc"])
+        .output()?;
+    assert_success(output);
+
+    assert_eq!(fs::read_to_string(repo.join("a.txt"))?, "right-a\n");
+    assert_eq!(fs::read_to_string(repo.join("b.txt"))?, "right-b\n");
+    let output = jj(&repo).args(["resolve", "--list"]).output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("No conflicts found"));
+    Ok(())
+}
+
+#[test]
 fn jj_resolve_q_cancels_merge_editor() -> io::Result<()> {
     if !jj_available() {
         return Ok(());
@@ -619,6 +641,27 @@ fn conflict_repo(name: &str) -> io::Result<PathBuf> {
     let left = rev(&repo)?;
     assert_success(jj(&repo).args(["new", "@-", "-m", "right"]).output()?);
     fs::write(repo.join("file.txt"), "right\n")?;
+    let right = rev(&repo)?;
+    assert_success(
+        jj(&repo)
+            .args(["new", &left, &right, "-m", "merge"])
+            .output()?,
+    );
+    Ok(repo)
+}
+
+fn multi_conflict_repo(name: &str) -> io::Result<PathBuf> {
+    let repo = init_repo(name)?;
+    fs::write(repo.join("a.txt"), "base-a\n")?;
+    fs::write(repo.join("b.txt"), "base-b\n")?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+    assert_success(jj(&repo).args(["new", "-m", "left"]).output()?);
+    fs::write(repo.join("a.txt"), "left-a\n")?;
+    fs::write(repo.join("b.txt"), "left-b\n")?;
+    let left = rev(&repo)?;
+    assert_success(jj(&repo).args(["new", "@-", "-m", "right"]).output()?);
+    fs::write(repo.join("a.txt"), "right-a\n")?;
+    fs::write(repo.join("b.txt"), "right-b\n")?;
     let right = rev(&repo)?;
     assert_success(
         jj(&repo)
