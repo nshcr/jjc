@@ -42,7 +42,13 @@ merge-args = [
   "--path",
   "$path",
 ]
+merge-tool-edits-conflict-markers = true
+conflict-marker-style = "git"
 ```
+
+The last two settings make `jj` prefill merge output with Git diff3 conflict
+markers, which enables `jjc`'s per-conflict-block navigation and partial
+resolution flow.
 
 ## Commands
 
@@ -135,8 +141,12 @@ Diff mode:
 
 - `j`, `k`: move between hunks
 - `[`, `]`: move between changed files
+- `n`, `p`, `PageUp`, `PageDown`: move inside the expanded hunk
 - `Space`: toggle hunk
+- `x`: toggle the current changed line or replacement pair
 - `S`, `D`: select or deselect the current file
+- `f`: toggle all hunks associated with the current function
+- `u`, `r`: undo or redo selection changes
 - expanded hunks show standard `space`, `+`, and `-` diff rows
 - `e`: manually edit the current file output with the same Vim-like text editor
 - `w`: write `$output` and quit
@@ -154,8 +164,15 @@ Merge mode:
 For binary conflicts, manual editing is disabled. Use `1`, `2`, or `3` to pick
 left/base/right, then `w` to write the selected side.
 
-`jjc edit` dims `JJ:` comment lines and warns before saving an empty commit
-message. Save again to intentionally write the empty message.
+For `.jjdescription` inputs, `jjc edit` dims `JJ:` instruction lines and warns
+before saving an empty commit description. `.jjsparse` inputs retain the
+instruction styling but allow an empty pattern set; generic `ui.editor` files
+receive neither description-only behavior. Save a warned description again to
+intentionally write it empty.
+
+Text cursors use grapheme boundaries and terminal cell widths. Long lines,
+wide CJK characters, emoji, combining marks, and tabs keep the cursor visible
+through a shared horizontal viewport without changing the underlying bytes.
 
 ## Supported jj flows
 
@@ -172,16 +189,23 @@ Release check:
 
 ```sh
 cargo fmt --check
-cargo check
-cargo test
-cargo install --path . --root /tmp/jjc-install-check --force
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
+JJC_REQUIRE_INTEGRATION=1 cargo test --locked --test smoke --test tty --test diff_tree_entries --test merge_markers
+cargo install --locked --path . --root /tmp/jjc-install-check --force
 ```
+
+The current compatibility floor is Rust 1.93.1. CI compiles the library and
+binary on Linux, macOS, and Windows, and runs the real `jj` plus PTY suite on
+Linux and macOS. The current local protocol baseline is `jj 0.43.0`; older jj
+versions are not claimed until they are added to the compatibility matrix.
 
 ## Current limits
 
 - Diff mode supports whole-hunk and line-level selection, added/deleted files,
-  file-level navigation and selection, binary accept-side choices, plus manual
-  editing of modified UTF-8 file output.
+  executable-bit and symlink entry choices, file-level navigation and
+  selection, binary accept-side choices, plus manual editing of modified UTF-8
+  file output.
 - Merge mode supports ordinary UTF-8 three-way text conflicts and binary
   accept-side resolution. Recognized conflict-marker blocks can be resolved one
   block at a time. For delete/modify conflicts, it can keep the modified side.
@@ -196,3 +220,7 @@ cargo install --path . --root /tmp/jjc-install-check --force
 - Visual mode, cross-line motion ranges, broader text objects, macros,
   file/directory conflicts, symlink conflicts, multi-side conflict UI, and the
   actual agent runtime are planned later.
+
+See [`docs/development-plan.md`](docs/development-plan.md) for the converged
+roadmap and [`docs/phase-4-development-plan.md`](docs/phase-4-development-plan.md)
+for the current correctness and release-gate plan.

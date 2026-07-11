@@ -5,6 +5,26 @@ minimal M8 editor-command boundary in `docs/development-plan.md`. Its goal is
 to make the existing `jj` diff and merge workflows more useful without turning
 `jjc` into a full editor or reimplementing `jj` internals.
 
+## Historical status and Phase 4 relationship
+
+Phase 2 is complete within its original content-oriented scope. It remains a
+record of the decisions and tests that introduced added/deleted regular files,
+binary whole-file choices, small Vim improvements, and merge-protocol boundary
+coverage.
+
+Later review found that the Phase 2 diff model classified content presence but
+did not model a complete repository tree entry. Executable state, symlink
+targets, and entry kinds are therefore not retroactively claimed as complete
+here. [Phase 4 P4.1](phase-4-development-plan.md#p41-diff-tree-entry-correctness)
+supersedes the relevant discovery and materialization design. It adds
+executable/symlink/file-to-symlink behavior while explicitly rejecting
+directory-involving and special entries before output mutation.
+
+Phase 2's external merge-protocol boundary remains valid. Phase 4 P4.2 fixed a
+separate local integration gap in the recommended conflict-marker configuration
+and added exact dynamic-marker handling; it does not broaden the upstream
+conflict shapes available to an external merge tool.
+
 ## Current baseline
 
 Observed current capabilities:
@@ -25,6 +45,9 @@ Known current limits:
   multi-register editing are still deferred.
 - Some merge cases are bounded by the external `jj` merge-tool protocol, not by
   local UI code alone.
+- Diff mode's Phase 2 file-kind model covers regular-file content presence and
+  binary/text choices. Phase 4 now owns executable/symlink identity and the
+  explicit rejection boundary for directory/special entries.
 - There is no agent runtime, network call path, or background write path.
 
 Execution status:
@@ -105,6 +128,12 @@ Design:
   file.
 - For addition, create parent directories before writing the selected file.
 - Treat `JJ-INSTRUCTIONS` as ignored metadata, same as current diff behavior.
+
+Historical boundary: this enum distinguished modified/added/deleted regular
+content. It was not a complete filesystem entry model. Do not extend this
+section's completion claim to executable metadata, symlink targets, or
+entry-kind transitions; use Phase 4 P4.1 for the implemented file/symlink
+behavior and directory/special rejection boundary.
 
 Tests:
 
@@ -295,3 +324,16 @@ Stop and checkpoint before:
 - Rewriting the shared editor model.
 - Implementing merge behavior that current `jj` does not expose to external
   tools.
+
+## Phase 4 handoff
+
+Phase 2 acceptance remains required regression coverage in the Phase 4 final
+gate. The implementation handoff is now:
+
+- P4.1 preserved existing text/binary and added/deleted regular-file choices
+  while replacing discovery and writeback with a one-time tree-entry snapshot.
+- P4.2 preserved the upstream merge boundary from P2.4 while making the
+  normal-text conflict-block workflow reachable and marker-length-correct.
+- P4.5 runs Phase 2 real-`jj` smoke tests under
+  `JJC_REQUIRE_INTEGRATION=1`, so missing `jj` cannot turn the CI integration
+  suite into a silent pass.

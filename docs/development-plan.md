@@ -1,36 +1,47 @@
 # jjc development plan
 
-`jjc` is a Rust TUI editor for Jujutsu (`jj`). Its long-term goal is to become
-one terminal-native editor that can serve all three `jj` editing surfaces:
+This document is the canonical product roadmap for `jjc`. Detailed historical
+work and acceptance evidence live in the phase documents linked below.
 
-- commit message editor: `ui.editor`
+Status as of 2026-07-10:
+
+- Foundation milestones and Phase 2 are complete within their recorded scope.
+- Phase 3 features are implemented, but later review found integration and
+  release-gate gaps that its original completion wording did not capture.
+- [Phase 4](phase-4-development-plan.md) is complete within its supported local
+  boundaries. The hosted CI result remains pending external evidence.
+
+## Product contract
+
+`jjc` is one terminal-native Rust TUI for the three Jujutsu (`jj`) editing
+surfaces:
+
+- text editor: `ui.editor`
 - diff editor: `ui.diff-editor`
 - merge editor: `ui.merge-editor`
 
-The early goal is personal daily usability. After the editor is stable enough
-for regular use, the project should be prepared as a public general-purpose
-tool for `jj`. The long-term design should keep the door open for possible
-upstream integration into `jj` as a single canonical editor.
+Commit descriptions are the highest-frequency `ui.editor` use case, but
+`ui.editor` is a general text-editor contract. `jj` also uses it for content
+such as sparse patterns. Commit-description-only behavior must therefore be
+selected from the file contract, not applied to every `jjc edit` invocation.
 
-## Non-goals for the first pass
+The project is terminal-first and protocol-first. It is not intended to become
+a full IDE or an internal clone of `jj`.
 
-- Do not link against `jj_lib` yet.
-- Do not reimplement `jj`'s built-in `scm-record` editor.
-- Do not support every conflict shape in the first merge editor.
-- Do not add a plugin system, agent runtime, or Tree-sitter layer before the
-  basic editor protocols are reliable.
-
-## External protocol
-
-The first stable CLI shape is:
+## Stable CLI boundary
 
 ```sh
+jjc doctor
 jjc edit <file>
 jjc diff <left> <right> <output>
 jjc merge <left> <base> <right> <output> --marker-length <n> --path <repo-path>
 ```
 
-Recommended `jj` config:
+The diff route intentionally uses the experimental three-pane directory
+protocol: `$output` starts as a copy of `$right`, and `jjc` writes the selected
+tree there. The two-pane `$left`/`$right` protocol is not a local target.
+
+The supported Phase 4 configuration is:
 
 ```toml
 [ui]
@@ -52,338 +63,226 @@ merge-args = [
   "--path",
   "$path",
 ]
+merge-tool-edits-conflict-markers = true
+conflict-marker-style = "git"
 ```
 
-The diff editor intentionally requires the 3-pane `$output` protocol. The
-2-pane `$left`/`$right` mode is skipped until there is a concrete reason to
-support it.
+`jjc doctor` emits the resolved executable path for `ui.editor` and
+`merge-tools.jjc.program`; the named `jjc` diff/merge routes resolve through that
+tool entry. The two merge-tool options make `jj` prefill `$output` with the Git
+diff3 markers that `jjc` recognizes.
 
 ## Product priorities
 
-Implementation priority:
+Maintain the three surfaces in this order:
 
-1. Commit message editor
-2. Diff editor
-3. Merge editor
+1. `ui.editor` correctness and daily usability.
+2. Diff tree and selection correctness.
+3. Merge usability within the external merge-tool boundary.
 
-Acceptance priority for the first usable milestone is still all three entry
-points: each mode must have a thin working version before the project is treated
-as usable.
+All three remain release-critical. A failure that can silently select the wrong
+tree entry is more severe than a missing convenience command.
 
 ## Interaction model
 
-The UI should feel like a small terminal tool, not a full IDE.
+The UI should feel like a small terminal tool, not a full editor suite.
 
-- Text editing follows a minimal Vim model.
-- Panel/list navigation follows a lazygit-style model.
-- First-pass Vim support prioritizes high-frequency `normal` and `insert`
-  commands.
-- `visual` mode is planned as a later layer after the shared text editor is
-  stable in all three entry points.
-- If a good Rust library can provide mature Vim editing behavior without
-  forcing a large framework, use it instead of hand-rolling Vim semantics.
+- Text editing uses one shared minimal Vim model.
+- Diff/list navigation uses direct, discoverable single-key actions.
+- Terminal cell width, not Unicode scalar count or UTF-8 byte count, determines
+  cursor placement and horizontal visibility.
+- Save/cancel semantics follow the calling `jj` protocol and must never silently
+  write on cancel.
 
-Current Vim-compatible commands:
+Implemented Vim-compatible commands include high-frequency normal and insert
+motions, find motions, line and word operators, a single yank buffer, case
+conversion, undo/redo, `:wq`, and `:q!`.
 
-- `Esc`: return to normal mode
-- `i`, `I`, `a`, `A`, `o`, `O`: enter insert mode
-- `h`, `j`, `k`, `l`, `0`, `^`, `$`, `g_`, `w`, `W`, `b`, `B`, `e`, `E`, `ge`, `gE`, `gg`, `G`: move
-- `%`: jump between paired brackets on the current line
-- `f`, `F`, `t`, `T`, `;`, `,`: find on the current line
-- `x`, `X`, `D`, `C`, `dd`, `cc`, `s`, `S`, `r`, `J`: delete/change/replace/join
-- `yy`, `Y`, `p`, `P`: line yank and paste
-- `~`, `guu`, `gUU`, `g~~`: case conversion
-- `dw`, `cw`, `yw`, `d$`, `c$`, `y$`, `df`, `ct`, `yf`, `ciw`, `diw`, `yiw`, `guw`, `gUw`, `g~w`, `gUf`, `g~t`: motion ranges and inner-word text objects
-- `u`, `Ctrl-r`: undo and redo
-- Insert mode supports ordinary text, `Enter`, `Backspace`, `Delete`,
-  `Ctrl-h`, `Ctrl-w`, `Ctrl-u`, `Ctrl-[`, and `Ctrl-c`
-- `:wq`: save and quit
-- `:q!`: cancel the editor and exit non-zero
+Deferred editor breadth:
 
-Deferred Vim-compatible commands:
+- Visual mode.
+- Cross-line operator ranges and broader text objects.
+- Macros and multiple registers.
+- Search and replace UI.
 
-- Visual mode
-- cross-line motion ranges
-- broader text objects such as `di(` and `yap`
-- macros and registers beyond the single built-in yank buffer
+These are not Phase 4 work unless a correctness fix requires a shared primitive.
 
 ## Dependency policy
 
-Prefer standard library code where it is enough, but do not rebuild solved
-pieces.
+Prefer the standard library for protocol and filesystem work, but use focused
+libraries for terminal, parsing, and Unicode behavior that should not be
+hand-rolled.
 
-Allowed early dependencies:
+Current dependency roles:
 
-- `clap` for CLI parsing
-- `similar` for text diff and hunk generation
-- current TUI stack: `ratatui` and `crossterm`
+- `clap`: CLI parsing.
+- `crossterm` and `ratatui`: terminal lifecycle, input, and rendering.
+- `similar`: text diff and hunk generation.
+- Tree-sitter grammar crates: function-aware hunks and shared syntax
+  highlighting.
+- `serde` and `toml`: `jjc` configuration.
 
-Tree-sitter is now used for function-aware hunks and shared syntax
-highlighting. Keep grammar support explicit: each bundled language needs a
-grammar crate and one registry entry.
+Phase 4 added focused Unicode width and grapheme segmentation dependencies for
+terminal-cell metrics and safe editing boundaries. They add no background
+runtime or network path.
 
-Defer heavier dependencies until they unlock a concrete feature:
+## Current architecture
 
-- agent/runtime dependencies: commit-message assistance and later guided edits
-
-## Architecture
-
-Keep modules boring and protocol-first:
+The current source tree is:
 
 ```text
 src/
-  main.rs          CLI dispatch and top-level error handling
-  cli.rs           clap definitions
-  app.rs           shared TUI loop and terminal cleanup guard
-  editor.rs        text buffer, cursor, normal/insert modes
-  edit.rs          commit message editor mode
-  diff.rs          diff editor mode
-  merge.rs         merge editor mode
-  fs.rs            small file/path helpers
+  main.rs       process entry point
+  lib.rs        library module boundary
+  cli.rs        clap commands and arguments
+  app.rs        command dispatch, path validation, terminal cleanup guard
+  editor.rs     ui.editor TUI and save/cancel policy
+  buffer.rs     UTF-8 text buffer and structured edits
+  vim.rs        shared normal/insert command model
+  input.rs      terminal and scripted key input
+  diff.rs       three-pane diff protocol, selection, output materialization
+  merge.rs      external merge protocol and output editing
+  render.rs     shared styled text and terminal cursor rendering
+  scroll.rs     viewport and scrollbar state
+  syntax.rs     Tree-sitter language registry, functions, highlighting
+  theme.rs      render theme model
+  config.rs     jjc config loading
+  doctor.rs     non-mutating environment/config diagnostics
+
+tests/
+  smoke.rs      scripted real-jj protocol tests
+  tty.rs        PTY and terminal-behavior tests
+  diff_tree_entries.rs
+                executable, symlink, and fail-before-write integration
+  merge_markers.rs
+                dynamic-marker real-jj integration
 ```
 
-Do not add abstractions before a second mode actually needs them. Shared code
-should start as small helpers, then move only when duplication becomes real.
-
-## Milestones
-
-### M0: Protocol shell
-
-Scope:
-
-- Add `clap` subcommands for `edit`, `diff`, and `merge`.
-- Validate paths and required arguments.
-- Enter the TUI for each mode.
-- Ensure terminal cleanup always runs after normal exit or error.
-
-Acceptance:
-
-- `jjc edit <file>` opens the editor mode.
-- `jjc diff <left> <right> <output>` opens the diff mode.
-- `jjc merge <left> <base> <right> <output> --marker-length 7 --path file.rs`
-  opens the merge mode.
-- Invalid arguments return non-zero with a useful error.
-- `cargo check` passes.
-
-### M1: Commit message editor
-
-Scope:
-
-- Built-in text editing for UTF-8 files.
-- Shared Vim-like `normal`/`insert` behavior.
-- `:wq` writes the file and exits.
-- `:q!` exits without writing and returns non-zero so `jj` cancels the edit.
-- `JJ:` comment lines may be visually muted, but the file should be preserved
-  exactly unless the user edits it. Let `jj` decide how to interpret comments.
-
-Acceptance:
-
-- `jj describe --config 'ui.editor=["jjc","edit"]'` can edit a commit message.
-- Saving writes the exact buffer to disk.
-- Discarding leaves the file unchanged.
-- The same text editing core is used by commit messages, merge text output, and
-  diff manual output editing.
-
-### M2: Diff editor with hunk selection
-
-Scope:
-
-- Require `$left`, `$right`, and `$output`.
-- Treat `$output` as initially equal to `$right`.
-- Generate line-based hunks with `similar`.
-- Toggle whole hunks between selected and unselected.
-- Selected hunk means keep the `$right` version in `$output`.
-- Unselected hunk means restore the `$left` version in `$output`.
-- Ignore `JJ-INSTRUCTIONS`.
-- Start with UTF-8 text files; binary files get a clear unsupported message.
-
-Acceptance:
-
-- `jj split` or `jj squash -i` can invoke `jjc`.
-- Hunk toggles are reflected in `$output`.
-- `jj` reads `$output` and applies the selected hunks correctly.
-
-Deferred:
-
-- Line-level selection
-- Function-level selection
-- Syntax-aware grouping
-- Manual editing inside a diff hunk
-- 2-pane diff editor mode
-
-### M3: Merge editor for simple text conflicts
-
-Scope:
-
-- Support ordinary UTF-8 three-way text conflicts.
-- Show left/base/right/output panes.
-- Allow accept-left, accept-base, accept-right, and manual output editing.
-- Save only to `$output`.
-- Preserve `--marker-length` and `--path` in the model for later conflict-marker
-  compatibility.
-
-Acceptance:
-
-- `jj resolve --tool jjc <path>` can resolve a simple text conflict.
-- Saving writes a complete `$output` file.
-- Discarding exits non-zero so `jj` cancels the resolution.
-
-First-pass unsupported cases:
-
-- multi-side conflicts
-- binary or non-UTF-8 conflicts
-- file/directory conflicts
-- symlink or submodule conflicts
-- executable-bit-only conflicts
-- delete/modify conflicts
-
-Unsupported cases must fail clearly and must not write misleading output.
-
-### M4: Daily-use hardening
-
-Scope:
-
-- Add focused tests for CLI parsing, file writes, hunk application, and terminal
-  cleanup.
-- Add minimal integration smoke tests using temporary `jj` repos.
-- Improve error messages for unsupported files and malformed inputs.
-- Add README setup instructions.
-
-Acceptance:
-
-- `cargo test` passes.
-- Smoke tests cover `describe`, `split` or `squash -i`, and `resolve`.
-- The tool can be installed with `cargo install --path .` and configured in
-  `jj`.
-
-### M5: Fine-grained diff editing
-
-Scope:
-
-- Add line-level selection inside hunks.
-- Add optional manual editing of `$output` for a selected file.
-- Add undo/redo for diff selection operations.
-
-Acceptance:
-
-- The user can split a change at line granularity without leaving the TUI.
-
-### M5.5: Vim hardening before Visual mode
-
-Scope:
-
-- Keep one shared text editing core for `edit`, merge text output, and diff
-  manual output.
-- Add only high-frequency `normal`/`insert` commands before Visual mode.
-- Keep command tests small and scriptable with `JJC_KEYS`.
-
-Acceptance:
-
-- Shared Vim command tests cover movement, delete/change, yank/paste, undo/redo,
-  and insert-mode control deletes.
-- Smoke tests cover `jj describe`, diff editing, and text/binary merge paths.
-- `cargo test` passes.
-
-### M6: Tree-sitter function hunks and syntax highlighting
-
-Scope:
-
-- Add Tree-sitter parsers through an explicit language registry.
-- Group hunks by enclosing function when possible.
-- Fall back to line hunks for unknown languages or parse failures.
-- Highlight edit, diff, and merge text views through one shared renderer.
-- Add jjc config for enabling/disabling syntax highlighting and overriding
-  per-class theme styles.
-
-Acceptance:
-
-- A complete function can be selected as one logical hunk.
-- Parse failures never block line-based editing.
-- Rust, Python, Go, JavaScript, TypeScript/TSX, JSON, C, and C++ are supported
-  by bundled grammar crates.
-- `jjc edit`, `jjc diff`, and `jjc merge` all use the same configured
-  highlighter for recognized file extensions.
-- Non-Rust highlighting and theme parsing have focused unit tests.
-
-### M7: Complex merge compatibility
-
-Handle unsupported conflict shapes one by one:
-
-- delete/modify conflicts: choose delete or keep modified output
-- binary conflicts: accept left/base/right only
-- file mode conflicts: expose explicit mode choices
-- file/directory conflicts: choose path-level resolution
-- symlink conflicts: accept side or edit target as text only when safe
-- multi-side conflicts: design a side list UI instead of pretending it is a
-  normal three-way conflict
-
-Important external-tool boundary:
-
-- The current `jj` external merge-tool protocol always consumes a single
-  `$output` file. `jj` treats empty or unchanged output as an error, so deletion
-  cannot be represented faithfully by this external binary alone.
-- For delete/modify conflicts, this external binary can keep the modified side,
-  but choosing the deleted side still needs upstream/internal integration.
-- `jj` rejects non-normal-file conflicts, conflicts with more than two sides,
-  and unresolved executable-bit conflicts before invoking the external merge
-  tool. Full support for those cases requires either upstream `jj` changes or a
-  future internal integration path.
-- The external binary can still support binary normal-file conflicts by accepting
-  left/base/right bytes and writing the selected side to `$output`.
-
-Acceptance:
-
-- Each added conflict shape has a test fixture and a clear UI action.
-
-### M8: Agent-ready editor layer
-
-Scope:
-
-- Keep the editor buffer and command model independent from the terminal UI.
-- Add a structured command API that an agent can call later.
-- Start with commit message assistance before code/diff mutation.
-
-Acceptance:
-
-- Agent suggestions can be applied as explicit buffer edits.
-- No background agent action writes files without user confirmation.
-
-Implementation boundary:
-
-- The current layer should stop at structured buffer commands and explicit
-  suggestion application. Do not add an agent runtime, network calls, or
-  background file writes until commit-message assistance has a concrete UX.
-
-## Testing strategy
-
-Use the smallest tests that catch real regressions:
-
-- Unit tests for path validation and command parsing.
-- Unit tests for text buffer operations.
-- Unit tests for hunk toggle to `$output` reconstruction.
-- Integration tests with temporary directories for diff/merge file protocols.
-- Smoke tests with real `jj` commands after the protocol modes exist.
-
-Do not build a large TUI automation suite until the UI stabilizes.
-
-## First implementation slice
-
-Start with M0 and the smallest useful piece of M1:
-
-1. Add `clap`.
-2. Split `main.rs` into CLI dispatch plus app loop.
-3. Implement `jjc edit <file>` with load/save/discard.
-4. Keep `diff` and `merge` as protocol-validated placeholder screens.
-5. Run `cargo check`.
-
-This gives all three entry points a real shape while making the highest-priority
-mode useful first.
-
-## Phase 2
-
-The detailed second-stage plan lives in
-[`docs/phase-2-development-plan.md`](phase-2-development-plan.md). It starts
-from the current M0-M6 implementation, keeps M7 protocol limits explicit, and
-orders the next work around added/deleted diff files, binary diff choices, small
-Vim improvements, merge-boundary cleanup, and preserving the agent-ready editor
-layer without adding an agent runtime.
+Keep shared behavior at these existing roots. Add a new module only when a
+concept has at least two real consumers or when isolation materially improves
+filesystem or rendering correctness.
+
+## Verified implementation baseline
+
+The checkout already contains:
+
+- Real `edit`, three-pane `diff`, and external `merge` entry points.
+- Shared normal/insert text editing, structured buffer edits, undo/redo, and
+  explicit save/cancel paths.
+- Whole-hunk, line, function, file, added/deleted, binary, executable, symlink,
+  and manual-output diff choices. Regular-file/symlink transitions are
+  supported; directory/special transitions fail before output mutation.
+- Ordinary text and binary normal-file merge choices, exact dynamic Git diff3
+  marker parsing, multi-block choices, and partial resolution.
+- Grapheme-safe editing, terminal-cell horizontal viewports for text-editing
+  surfaces, fingerprint-cached highlighting, and a `512 KiB` plain fallback.
+- Description, sparse, and generic `ui.editor` profiles.
+- Scripted real-`jj` smoke tests, eight tree-entry integrations, three dynamic
+  marker integrations, and a fixed-size replayed 19-test PTY suite.
+- A read-only `jjc doctor` whose generated config is exercised through all three
+  routes.
+- Rust 1.93.1 metadata and CI matrices for formatting, clippy, tests, pinned
+  `jj 0.43.0`, installation, and latest-`jj` advisory probing.
+
+The final Phase 4 local gate passed from the converged working state. After the
+branch is published, the hosted CI result remains separate external evidence.
+
+## Roadmap
+
+### Foundation milestones: complete within recorded scope
+
+The initial milestones established:
+
+- M0: protocol shell and terminal cleanup.
+- M1: built-in text editing and `ui.editor` save/cancel.
+- M2/M5: hunk- and line-level diff selection plus manual output editing.
+- M3: ordinary three-way text merge output.
+- M4/M5.5: tests, smoke coverage, and shared Vim hardening.
+- M6: function-aware hunks and shared syntax highlighting.
+- M8 boundary: structured, explicit in-memory suggestion edits without an agent
+  runtime.
+
+The old M7 “complex merge compatibility” list mixed local work with conflict
+shapes that `jj` does not pass to external tools. Its valid local behavior and
+upstream limits are now recorded in the phase plans; it is not an open promise
+to bypass the upstream protocol.
+
+### Phase 2: complete, with Phase 4 corrections
+
+[Phase 2](phase-2-development-plan.md) added regular-file added/deleted and
+binary diff choices, small Vim improvements, merge-protocol boundary tests, and
+preserved the agent-ready buffer boundary. Phase 4 P4.1 supersedes its
+content-only tree model with executable and symlink-aware snapshots while
+keeping directory/special transitions explicitly unsupported.
+
+### Phase 3: historically implemented, closure expanded by Phase 4
+
+[Phase 3](phase-3-development-plan.md) added `doctor`, multi-file diff
+navigation, conflict-block operations, description warnings, and a release
+checklist. Later review found that the recommended merge config did not make the
+conflict blocks available and that the release checklist was not an enforced
+compatibility gate. Phase 4 P4.2, P4.4, and P4.5 supersede those completion
+claims without erasing the implementation history.
+
+### Phase 4: complete within the supported local boundary
+
+[Phase 4](phase-4-development-plan.md) is the current acceptance source:
+
+1. P4.1 implements safe executable/symlink diff entries and fail-before-write
+   rejection for directory/special/unsafe-output cases.
+2. P4.2 makes exact dynamic Git-marker block behavior reachable and proves
+   complete, partial, and automatically lengthened real-`jj` flows.
+3. P4.3 implements grapheme/cell-correct text viewports, fingerprint caching,
+   a `512 KiB` fallback, and fixed-size replayed PTY coverage.
+4. P4.4 separates description/sparse/generic semantics and proves the generated
+   doctor configuration through all three routes.
+5. P4.5 defines Rust 1.93.1, pinned `jj 0.43.0`, strict integration, install,
+   platform, and advisory latest-`jj` CI gates.
+
+The documented final local gate passed from the converged working state. Hosted
+CI remains separate external evidence until the workflow actually runs.
+
+### Later product work
+
+After Phase 4 closes, separately design and prioritize:
+
+- Visual mode and broader Vim compatibility.
+- Search and larger navigation surfaces.
+- More adaptive merge layouts.
+- Commit-description assistance built on explicit structured edits.
+- A possible internal/upstream integration path for conflict shapes that the
+  external tool protocol cannot represent.
+
+No agent runtime, background write path, plugin system, or `jj_lib` dependency
+is implied by Phase 4.
+
+## Upstream merge boundary
+
+The external merge route consumes one `$output` file and is invoked only for
+conflicts that `jj` can materialize for an external tool. Current upstream
+limitations include deletion as the chosen result, non-normal tree entries,
+unresolved executable-bit conflicts, file/directory conflicts, symlink
+conflicts, and conflicts with more than two sides.
+
+Phase 4 does not promise local support for shapes that `jj` rejects before
+invoking `jjc` or that cannot be faithfully returned through one `$output`
+file. Revisit those only after an upstream protocol change or a separately
+approved internal integration design.
+
+## Validation policy
+
+Use layered evidence:
+
+- Unit tests for buffer, rendering, tree-entry classification, materialization,
+  marker parsing, and config generation.
+- Filesystem integration tests for output type, link target, executable bit,
+  unsafe ancestry, unsupported-entry fail-before-write behavior, and cancel
+  safety.
+- Real-`jj` smoke tests for every protocol-affecting behavior.
+- PTY tests for cursor placement, viewport behavior, and terminal cleanup.
+- CI gates for formatting, clippy, tests, install/package checks, and the
+  declared platform/`jj` compatibility matrix.
+
+Tests that require `jj` or a PTY helper must not silently skip in the CI job that
+claims to exercise them. Unsupported platform cases should be explicitly gated
+and documented rather than counted as passing evidence.

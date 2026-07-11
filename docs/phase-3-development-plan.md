@@ -6,6 +6,25 @@ goal is to make `jjc` safe and convenient enough to set as the default daily
 `jj` editor without turning it into a full editor, agent host, or `jj`
 internal clone.
 
+## Historical status and Phase 4 relationship
+
+Phase 3 records implemented feature slices, but its original “default daily
+editor” closure was broader than the evidence ultimately supported. A later
+code/config review found three gaps:
+
+- `doctor` did not emit the merge marker settings required by the implemented
+  conflict-block parser.
+- `jjc edit` treated the general `ui.editor` route as if every input were a
+  commit description.
+- The release command list was not an enforced CI, clippy, pinned-`jj`, and
+  platform compatibility gate.
+
+[Phase 4](phase-4-development-plan.md) supersedes those closure claims while
+preserving the Phase 3 implementation history. Its implementation now closes
+the three local gaps; the final local full gate and hosted CI result remain
+pending evidence. P3.2 navigation and the P3.3/P3.4 mechanisms remain
+regression baselines.
+
 ## Goal contract
 
 Outcome:
@@ -54,7 +73,8 @@ Implementation order:
 
 ## P3.1: Default usability checks
 
-Status: implemented.
+Status: implemented in its original scope; Phase 4 P4.2 and P4.4 now provide the
+complete configuration contract and real generated-config evidence.
 
 Problem:
 
@@ -81,6 +101,14 @@ Acceptance:
   `ui.diff-editor`, and `ui.merge-editor`.
 - Missing `jj` is reported clearly and returns non-zero.
 - No new dependency is added.
+
+Later finding:
+
+- The generated snippet omitted
+  `merge-tool-edits-conflict-markers = true` and
+  `conflict-marker-style = "git"`. Phase 4 fixed the snippet, standardized the
+  tested baseline at `jj 0.43.0`, and added a real test that uses the
+  doctor-generated config for edit, diff, and merge routes.
 
 ## P3.2: Diff file navigation
 
@@ -116,7 +144,9 @@ Evidence:
 
 ## P3.3: Merge conflict-block workflow
 
-Status: implemented.
+Status: local mechanism implemented; the documented integration path, exact
+dynamic marker parsing, and real multi-block acceptance are completed by Phase
+4 P4.2.
 
 Problem:
 
@@ -146,9 +176,19 @@ Evidence:
 - Unit coverage verifies current conflict-block side acceptance.
 - Unit coverage verifies saving with conflict markers warns before writing.
 
+Later finding:
+
+- These unit tests construct Git diff3 markers directly. Under the previously
+  recommended `jj` config, `$output` starts empty, so a normal real
+  `jj resolve --tool jjc` invocation did not expose those blocks. Phase 4 added
+  marker prefill, a per-tool Git marker style, exact `$marker_length` parsing,
+  and three real marker fixtures covering complete, partial, and automatically
+  lengthened conflicts.
+
 ## P3.4: Commit message editor hardening
 
-Status: implemented.
+Status: description behavior implemented; Phase 4 P4.4 completes generic and
+sparse `ui.editor` semantics.
 
 Problem:
 
@@ -180,9 +220,18 @@ Evidence:
 - Smoke coverage verifies `jj describe --editor` does not complete on the first
   empty `:wq`.
 
+Later finding:
+
+- The guard is valid for `.jjdescription`, but `ui.editor` also edits inputs
+  such as `.jjsparse`. Phase 4 preserves the description warning and now makes
+  empty sparse and generic saves follow their own semantics, including a real
+  empty-sparse smoke test.
+
 ## P3.5: Release and compatibility guardrails
 
-Status: implemented.
+Status: historical checklist implemented; Phase 4 P4.5 implements the enforced
+release/compatibility workflow. The final local gate passed; the hosted CI run
+remains pending external evidence.
 
 Problem:
 
@@ -207,6 +256,13 @@ Evidence:
 - README lists supported `jj` entry points.
 - README includes the release check command sequence.
 
+Later finding:
+
+- A documented local command sequence does not ensure warnings-as-errors
+  clippy, clean-checkout CI, pinned `jj`, PTY prerequisites, platform tiers, or
+  non-skipping protocol tests. Phase 4 P4.5 now encodes those gates for Rust
+  1.93.1 and pinned `jj 0.43.0`, with a non-blocking latest-`jj` advisory job.
+
 ## Validation set
 
 Run before marking any Phase 3 slice complete:
@@ -219,3 +275,17 @@ cargo test
 
 For protocol-affecting slices, the relevant smoke test must run through real
 `jj`, not only a unit-level protocol mock.
+
+## Phase 4 handoff
+
+Phase 4 retained all Phase 3 behavior and closed the later local findings:
+
+- P4.2 makes the P3.3 conflict-block workflow reachable and proves it through
+  complete, partial, and marker-lengthened `jj resolve` flows.
+- P4.4 narrows P3.4's description policy to the correct profiles and proves the
+  generated doctor config across all three routes.
+- P4.5 turns P3.5's release checklist into an enforced matrix where real-`jj`
+  and PTY requirements cannot silently skip.
+
+Do not mark Phase 3 “failed” or erase its evidence. Its feature work is the
+baseline; Phase 4 corrects the integration and completion boundary.
