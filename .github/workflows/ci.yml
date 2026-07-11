@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.1
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo metadata --locked --no-deps --format-version 1
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-targets --all-features
+      - run: cargo install --locked --path . --root target/install-check --force
+      - name: Check installed binary (Unix)
+        if: runner.os != 'Windows'
+        run: target/install-check/bin/jjc --version
+      - name: Check installed binary (Windows)
+        if: runner.os == 'Windows'
+        run: target/install-check/bin/jjc.exe --version
+
+  jj-integration:
+    name: jj integration (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.1
+      - name: Install expect
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes expect
+      - name: Install jj
+        run: cargo install --locked jj-cli --version 0.43.0
+      - run: jj --version
+      - name: Install jjc from the locked graph
+        run: cargo install --locked --path . --root target/install-check --force
+      - name: Check installed doctor output
+        run: target/install-check/bin/jjc doctor
+      - name: Run real jj and TTY tests
+        env:
+          JJC_REQUIRE_INTEGRATION: "1"
+        run: cargo test --locked --test smoke --test tty --test diff_tree_entries --test merge_markers
+
+  latest-jj:
+    name: latest jj advisory
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.1
+      - run: sudo apt-get update && sudo apt-get install --yes expect
+      - run: cargo install --locked jj-cli
+      - run: jj --version
+      - name: Probe latest jj protocol compatibility
+        env:
+          JJC_REQUIRE_INTEGRATION: "1"
+        run: cargo test --locked --test smoke --test tty --test diff_tree_entries --test merge_markers
