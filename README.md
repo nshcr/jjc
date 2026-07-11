@@ -3,6 +3,7 @@
 [![CI](https://github.com/nshcr/jjc/actions/workflows/ci.yml/badge.svg)](https://github.com/nshcr/jjc/actions/workflows/ci.yml)
 [![Rust 1.93.1+](https://img.shields.io/badge/rust-1.93.1%2B-orange.svg)](https://www.rust-lang.org)
 [![Jujutsu](https://img.shields.io/badge/Jujutsu-0.43.0_baseline-blueviolet.svg)](https://jj-vcs.github.io/jj/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **One terminal-native editor for Jujutsu commit messages, interactive diffs, and merge conflicts.**
 
@@ -29,6 +30,10 @@ Requires Rust 1.93.1 or newer and [`jj`](https://jj-vcs.github.io/jj/latest/inst
 cargo install --locked --git https://github.com/nshcr/jjc
 jjc doctor
 ```
+
+Prebuilt archives for Linux, macOS, and Windows are available from
+[GitHub Releases](https://github.com/nshcr/jjc/releases). Each release includes
+a `SHA256SUMS` file for artifact verification.
 
 Add the configuration printed by `jjc doctor`, or copy this into your `jj`
 config:
@@ -212,3 +217,7 @@ cargo run -- doctor
 
 Contributions and focused bug reports are welcome. If an issue depends on `jj`
 behavior, include the output of `jj --version` and `jjc doctor`.
+
+## License
+
+`jjc` is available under the [MIT License](LICENSE).

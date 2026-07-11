@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.93.1"
 description = "A terminal-native commit, diff, and merge editor for Jujutsu"
+license = "MIT"
 repository = "https://github.com/nshcr/jjc"
 readme = "README.md"
 keywords = ["jujutsu", "jj", "tui", "editor", "version-control"]
