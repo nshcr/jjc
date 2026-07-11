@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -38,6 +39,7 @@ jobs:
           toolchain: 1.93.1
           targets: ${{ matrix.target }}
       - name: Verify tag matches Cargo package version
+        if: github.event_name == 'push'
         shell: bash
         run: |
           package_version="$(cargo pkgid | sed 's/.*[#@]//')"
@@ -71,6 +73,7 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: build
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
