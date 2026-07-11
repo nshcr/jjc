@@ -19,11 +19,17 @@ use ratatui::widgets::ScrollbarOrientation;
 use crate::buffer::TextBuffer;
 use crate::config::AppConfig;
 use crate::input;
+#[cfg(test)]
 use crate::render::StyledText;
+use crate::render::StyledTextCache;
+use crate::render::TAB_WIDTH;
+use crate::render::display_boundary_at_or_after;
+use crate::render::display_width;
+use crate::render::is_large_content;
 use crate::render::set_vim_cursor_style;
-use crate::render::string_lines;
 use crate::scroll::ViewScroll;
 use crate::scroll::scrollbar_area;
+use crate::scroll::terminal_offset;
 use crate::vim::Vim;
 use crate::vim::VimMode;
 
@@ -66,6 +72,10 @@ pub struct MergeApp {
     pending_marker_save: bool,
     scroll: ViewScroll,
     config: AppConfig,
+    left_cache: StyledTextCache,
+    base_cache: StyledTextCache,
+    right_cache: StyledTextCache,
+    output_cache: StyledTextCache,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -85,6 +95,12 @@ impl MergeApp {
         marker_length: usize,
         path: String,
     ) -> io::Result<Self> {
+        if marker_length == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "marker length must be greater than zero",
+            ));
+        }
         let left_bytes = fs::read(&left)?;
         let base_bytes = fs::read(&base)?;
         let right_bytes = fs::read(&right)?;
@@ -118,6 +134,10 @@ impl MergeApp {
             pending_marker_save: false,
             scroll: ViewScroll::default(),
             config: AppConfig::load()?,
+            left_cache: StyledTextCache::default(),
+            base_cache: StyledTextCache::default(),
+            right_cache: StyledTextCache::default(),
+            output_cache: StyledTextCache::default(),
         })
     }
 
@@ -146,36 +166,65 @@ impl MergeApp {
                         output,
                     } => {
                         let path = Path::new(&self.path);
-                        let left_lines = string_lines(left);
-                        let base_lines = string_lines(base);
-                        let right_lines = string_lines(right);
                         let height = columns[3].height.saturating_sub(2) as usize;
+                        let width = columns[3].width.saturating_sub(2) as usize;
                         self.scroll
                             .keep_visible(output.cursor_y(), output.lines().len(), height);
+                        let cursor_column = display_width(
+                            &output.current_line()[..output.cursor_byte()],
+                            TAB_WIDTH,
+                        );
+                        let content_width = output
+                            .lines()
+                            .iter()
+                            .map(|line| display_width(line, TAB_WIDTH))
+                            .max()
+                            .unwrap_or(0);
+                        self.scroll
+                            .keep_column_visible(cursor_column, content_width, width);
+                        self.scroll
+                            .set_horizontal_offset(display_boundary_at_or_after(
+                                output.current_line(),
+                                self.scroll.horizontal_offset(),
+                                TAB_WIDTH,
+                            ));
                         let scroll = self.scroll.offset();
+                        let horizontal_scroll = self.scroll.horizontal_offset();
                         let mut scrollbar_state =
                             self.scroll.scrollbar_state(output.lines().len(), height);
                         frame.render_widget(
-                            pane("left", pane_lines(path, &left_lines, &self.config), scroll),
+                            pane(
+                                "left",
+                                self.left_cache.text(path, left, &self.config),
+                                scroll,
+                                horizontal_scroll,
+                            ),
                             columns[0],
                         );
                         frame.render_widget(
-                            pane("base", pane_lines(path, &base_lines, &self.config), scroll),
+                            pane(
+                                "base",
+                                self.base_cache.text(path, base, &self.config),
+                                scroll,
+                                horizontal_scroll,
+                            ),
                             columns[1],
                         );
                         frame.render_widget(
                             pane(
                                 "right",
-                                pane_lines(path, &right_lines, &self.config),
+                                self.right_cache.text(path, right, &self.config),
                                 scroll,
+                                horizontal_scroll,
                             ),
                             columns[2],
                         );
                         frame.render_widget(
                             pane(
                                 "output",
-                                pane_lines(path, output.lines(), &self.config),
+                                self.output_cache.lines(path, output.lines(), &self.config),
                                 scroll,
+                                horizontal_scroll,
                             ),
                             columns[3],
                         );
@@ -184,12 +233,8 @@ impl MergeApp {
                             scrollbar_area(columns[3]),
                             &mut scrollbar_state,
                         );
-                        let x = columns[3].x
-                            + 1
-                            + output
-                                .cursor_column()
-                                .min(columns[3].width.saturating_sub(2) as usize)
-                                as u16;
+                        let visible_x = self.scroll.visible_column(cursor_column, width);
+                        let x = columns[3].x + 1 + visible_x as u16;
                         let y = columns[3].y
                             + 1
                             + self.scroll.visible_line(output.cursor_y(), height) as u16;
@@ -335,8 +380,14 @@ impl MergeApp {
                 "{}  conflict markers remain; save again to write anyway",
                 self.path
             ),
+            (MergeContent::Text { output, .. }, Mode::Text) if is_large_content(output.lines()) => {
+                format!(
+                    "{}  PLAIN LARGE FILE  syntax disabled  :wq save  q cancel",
+                    self.path
+                )
+            }
             (MergeContent::Text { output, .. }, Mode::Text)
-                if conflict_blocks(output.lines()).len() == 1
+                if conflict_blocks(output.lines(), self.marker_length).len() == 1
                     && self.vim.mode() == VimMode::Normal =>
             {
                 format!(
@@ -369,7 +420,7 @@ impl MergeApp {
                 output,
             } => {
                 self.pending_marker_save = false;
-                if !accept_current_conflict_block(output, side) {
+                if !accept_current_conflict_block(output, side, self.marker_length) {
                     output.set_text(match side {
                         Side::Left => left,
                         Side::Base => base,
@@ -385,7 +436,7 @@ impl MergeApp {
         let MergeContent::Text { output, .. } = &mut self.content else {
             return;
         };
-        let blocks = conflict_blocks(output.lines());
+        let blocks = conflict_blocks(output.lines(), self.marker_length);
         if blocks.is_empty() {
             return;
         }
@@ -408,7 +459,9 @@ impl MergeApp {
     fn save(&mut self) -> io::Result<bool> {
         match &self.content {
             MergeContent::Text { output, .. } => {
-                if has_conflict_markers(output.lines()) && !self.pending_marker_save {
+                if has_conflict_markers(output.lines(), self.marker_length)
+                    && !self.pending_marker_save
+                {
                     self.pending_marker_save = true;
                     return Ok(false);
                 }
@@ -447,12 +500,18 @@ fn read_optional_text(path: &Path) -> io::Result<Option<String>> {
     }
 }
 
-fn pane(title: &str, lines: Vec<Line<'static>>, scroll: usize) -> Paragraph<'static> {
+fn pane(
+    title: &str,
+    lines: Vec<Line<'static>>,
+    scroll: usize,
+    horizontal_scroll: usize,
+) -> Paragraph<'static> {
     Paragraph::new(lines)
-        .scroll((scroll as u16, 0))
+        .scroll((terminal_offset(scroll), terminal_offset(horizontal_scroll)))
         .block(Block::bordered().title(title.to_owned()))
 }
 
+#[cfg(test)]
 fn pane_lines(path: &Path, lines: &[String], config: &AppConfig) -> Vec<Line<'static>> {
     StyledText::new(path, lines, config).lines()
 }
@@ -463,8 +522,13 @@ fn binary_pane(title: &str, bytes: &[u8], selected: bool) -> Paragraph<'static> 
         .block(Block::bordered().title(title.to_owned()))
 }
 
-fn accept_current_conflict_block(output: &mut TextBuffer, side: Side) -> bool {
-    let Some(block) = current_conflict_block(output.lines(), output.cursor_y()) else {
+fn accept_current_conflict_block(
+    output: &mut TextBuffer,
+    side: Side,
+    marker_length: usize,
+) -> bool {
+    let Some(block) = current_conflict_block(output.lines(), output.cursor_y(), marker_length)
+    else {
         return false;
     };
     let replacement = match side {
@@ -483,53 +547,78 @@ fn accept_current_conflict_block(output: &mut TextBuffer, side: Side) -> bool {
     true
 }
 
-fn current_conflict_block(lines: &[String], cursor: usize) -> Option<ConflictBlock> {
-    conflict_blocks(lines)
+fn current_conflict_block(
+    lines: &[String],
+    cursor: usize,
+    marker_length: usize,
+) -> Option<ConflictBlock> {
+    conflict_blocks(lines, marker_length)
         .into_iter()
         .find(|block| block.start <= cursor && cursor <= block.end)
-        .or_else(|| conflict_blocks(lines).into_iter().next())
+        .or_else(|| conflict_blocks(lines, marker_length).into_iter().next())
 }
 
-fn has_conflict_markers(lines: &[String]) -> bool {
-    !conflict_blocks(lines).is_empty()
+fn has_conflict_markers(lines: &[String], marker_length: usize) -> bool {
+    !conflict_blocks(lines, marker_length).is_empty()
 }
 
-fn conflict_blocks(lines: &[String]) -> Vec<ConflictBlock> {
+fn conflict_blocks(lines: &[String], marker_length: usize) -> Vec<ConflictBlock> {
     let mut blocks = Vec::new();
     let mut index = 0;
     while index < lines.len() {
-        if !lines[index].starts_with("<<<<<<<") {
+        let Some(block) = parse_conflict_block(lines, index, marker_length) else {
             index += 1;
             continue;
-        }
-        let start = index;
-        let mut base_marker = None;
-        let mut separator = None;
-        let mut end = None;
-        index += 1;
-        while index < lines.len() {
-            let line = &lines[index];
-            if line.starts_with("|||||||") {
-                base_marker = Some(index);
-            } else if line.starts_with("=======") {
-                separator = Some(index);
-            } else if line.starts_with(">>>>>>>") {
-                end = Some(index);
-                break;
-            }
-            index += 1;
-        }
-        if let (Some(separator), Some(end)) = (separator, end) {
-            blocks.push(ConflictBlock {
-                start,
-                base_marker,
-                separator,
-                end,
-            });
-        }
-        index += 1;
+        };
+        index = block.end + 1;
+        blocks.push(block);
     }
     blocks
+}
+
+fn parse_conflict_block(
+    lines: &[String],
+    start: usize,
+    marker_length: usize,
+) -> Option<ConflictBlock> {
+    if !is_marker_line(lines.get(start)?, '<', marker_length) {
+        return None;
+    }
+    let mut base_marker = None;
+    let mut separator = None;
+    for (index, line) in lines.iter().enumerate().skip(start + 1) {
+        if is_marker_line(line, '<', marker_length) {
+            return None;
+        }
+        if is_marker_line(line, '|', marker_length) {
+            if base_marker.is_some() || separator.is_some() {
+                return None;
+            }
+            base_marker = Some(index);
+        } else if is_marker_line(line, '=', marker_length) {
+            if separator.is_some() {
+                return None;
+            }
+            separator = Some(index);
+        } else if is_marker_line(line, '>', marker_length) {
+            return Some(ConflictBlock {
+                start,
+                base_marker,
+                separator: separator?,
+                end: index,
+            });
+        }
+    }
+    None
+}
+
+fn is_marker_line(line: &str, marker: char, marker_length: usize) -> bool {
+    marker_length > 0
+        && line
+            .chars()
+            .take_while(|current| *current == marker)
+            .count()
+            == marker_length
 }
 
 #[cfg(test)]
@@ -540,6 +629,23 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn open_rejects_zero_marker_length() {
+        let error = MergeApp::open(
+            PathBuf::from("missing-left"),
+            PathBuf::from("missing-base"),
+            PathBuf::from("missing-right"),
+            PathBuf::from("missing-output"),
+            0,
+            "file.txt".to_owned(),
+        )
+        .err()
+        .expect("zero marker length must fail before paths are read");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("greater than zero"));
+    }
 
     #[test]
     fn save_writes_output_buffer() {
@@ -586,6 +692,10 @@ mod tests {
             pending_marker_save: false,
             scroll: ViewScroll::default(),
             config: AppConfig::default(),
+            left_cache: StyledTextCache::default(),
+            base_cache: StyledTextCache::default(),
+            right_cache: StyledTextCache::default(),
+            output_cache: StyledTextCache::default(),
         };
 
         assert!(app.save().unwrap());
@@ -627,6 +737,81 @@ mod tests {
 
         assert_eq!(fs::read_to_string(output).unwrap(), "right\n");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn accepts_dynamic_length_block_without_consuming_short_marker_literals() {
+        let (root, output_path) = temp_output();
+        let mut app = app(output_path);
+        app.marker_length = 11;
+        if let MergeContent::Text { output, .. } = &mut app.content {
+            output.set_text(
+                "before\n<<<<<<<<<<< left\nleft\n||||||||||| base\nbase\n===========\nright-before\n>>>>>>>\nright-after\n>>>>>>>>>>> right\nafter\n",
+            );
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE))
+            .unwrap();
+
+        if let MergeContent::Text { output, .. } = &app.content {
+            assert_eq!(
+                output.to_text(),
+                "before\nright-before\n>>>>>>>\nright-after\nafter\n"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn marker_lines_require_the_exact_configured_run_length() {
+        let lines = vec![
+            "<<<<<<<< short".to_owned(),
+            "<<<<<<<<<< too-long".to_owned(),
+            "<<<<<<<<< left".to_owned(),
+            "left".to_owned(),
+            "||||||||| base".to_owned(),
+            "base".to_owned(),
+            "=========".to_owned(),
+            "right".to_owned(),
+            ">>>>>>>>> right".to_owned(),
+        ];
+
+        assert_eq!(
+            conflict_blocks(&lines, 9),
+            vec![ConflictBlock {
+                start: 2,
+                base_marker: Some(4),
+                separator: 6,
+                end: 8,
+            }]
+        );
+        assert!(conflict_blocks(&lines, 8).is_empty());
+        assert!(conflict_blocks(&lines, 10).is_empty());
+    }
+
+    #[test]
+    fn malformed_or_incomplete_marker_sequences_are_not_blocks() {
+        let malformed = vec![
+            "<<<<<<< left".to_owned(),
+            "left".to_owned(),
+            "=======".to_owned(),
+            "right".to_owned(),
+            "||||||| base-after-separator".to_owned(),
+            "base".to_owned(),
+            ">>>>>>> right".to_owned(),
+        ];
+        let incomplete = vec![
+            "<<<<<<< left".to_owned(),
+            "left".to_owned(),
+            "=======".to_owned(),
+            "right".to_owned(),
+        ];
+
+        assert!(conflict_blocks(&malformed, 7).is_empty());
+        assert!(conflict_blocks(&incomplete, 7).is_empty());
+        assert!(!has_conflict_markers(&malformed, 7));
+        assert!(!has_conflict_markers(&incomplete, 7));
+        assert!(conflict_blocks(&incomplete, 0).is_empty());
     }
 
     #[test]
@@ -712,6 +897,10 @@ mod tests {
             pending_marker_save: false,
             scroll: ViewScroll::default(),
             config: AppConfig::default(),
+            left_cache: StyledTextCache::default(),
+            base_cache: StyledTextCache::default(),
+            right_cache: StyledTextCache::default(),
+            output_cache: StyledTextCache::default(),
         }
     }
 

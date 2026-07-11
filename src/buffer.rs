@@ -1,3 +1,5 @@
+use unicode_segmentation::UnicodeSegmentation;
+
 #[derive(Clone)]
 pub struct TextBuffer {
     lines: Vec<String>,
@@ -282,6 +284,10 @@ impl TextBuffer {
         self.lines[self.cursor_y][..self.cursor_x].chars().count()
     }
 
+    pub fn cursor_byte(&self) -> usize {
+        self.cursor_x
+    }
+
     pub fn move_left(&mut self) {
         self.cursor_x = prev_boundary(&self.lines[self.cursor_y], self.cursor_x);
     }
@@ -305,8 +311,8 @@ impl TextBuffer {
 
     pub fn move_first_nonblank(&mut self) {
         self.cursor_x = self.lines[self.cursor_y]
-            .char_indices()
-            .find(|(_, c)| !c.is_whitespace())
+            .grapheme_indices(true)
+            .find(|(_, grapheme)| !grapheme_is_whitespace(grapheme))
             .map(|(index, _)| index)
             .unwrap_or(0);
     }
@@ -317,9 +323,9 @@ impl TextBuffer {
 
     pub fn move_last_nonblank(&mut self) {
         self.cursor_x = self.lines[self.cursor_y]
-            .char_indices()
+            .grapheme_indices(true)
             .rev()
-            .find(|(_, c)| !c.is_whitespace())
+            .find(|(_, grapheme)| !grapheme_is_whitespace(grapheme))
             .map(|(index, _)| index)
             .unwrap_or(0);
     }
@@ -474,7 +480,8 @@ impl TextBuffer {
 
     pub fn delete_char(&mut self) {
         if self.cursor_x < self.lines[self.cursor_y].len() {
-            self.lines[self.cursor_y].remove(self.cursor_x);
+            let end = next_boundary(&self.lines[self.cursor_y], self.cursor_x);
+            self.lines[self.cursor_y].drain(self.cursor_x..end);
         }
     }
 
@@ -548,12 +555,15 @@ impl TextBuffer {
     }
 
     pub fn toggle_char_case(&mut self) {
-        let Some(c) = self.lines[self.cursor_y][self.cursor_x..].chars().next() else {
+        if self.cursor_x >= self.lines[self.cursor_y].len() {
             return;
-        };
-        let replacement = toggle_case(c);
-        self.lines[self.cursor_y]
-            .replace_range(self.cursor_x..self.cursor_x + c.len_utf8(), &replacement);
+        }
+        let end = next_boundary(&self.lines[self.cursor_y], self.cursor_x);
+        let replacement = self.lines[self.cursor_y][self.cursor_x..end]
+            .chars()
+            .map(toggle_case)
+            .collect::<String>();
+        self.lines[self.cursor_y].replace_range(self.cursor_x..end, &replacement);
         self.move_right_insert();
     }
 
@@ -619,7 +629,7 @@ fn join_text(lines: &[String], trailing_newline: bool) -> String {
 }
 
 fn prev_boundary(line: &str, cursor: usize) -> usize {
-    line.char_indices()
+    line.grapheme_indices(true)
         .map(|(index, _)| index)
         .take_while(|index| *index < cursor)
         .last()
@@ -627,59 +637,74 @@ fn prev_boundary(line: &str, cursor: usize) -> usize {
 }
 
 fn next_boundary(line: &str, cursor: usize) -> usize {
-    line.char_indices()
+    line.grapheme_indices(true)
         .map(|(index, _)| index)
         .find(|index| *index > cursor)
         .unwrap_or(line.len())
 }
 
 fn last_char_boundary(line: &str) -> usize {
-    line.char_indices()
+    line.grapheme_indices(true)
         .map(|(index, _)| index)
-        .last()
+        .next_back()
         .unwrap_or(0)
 }
 
 fn floor_boundary(line: &str, cursor: usize) -> usize {
-    if line.is_char_boundary(cursor) {
-        cursor
-    } else {
-        prev_boundary(line, cursor)
+    if cursor >= line.len() {
+        return line.len();
     }
+    line.grapheme_indices(true)
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= cursor)
+        .last()
+        .unwrap_or(0)
 }
 
 fn char_column_to_byte(line: &str, column: usize) -> usize {
-    line.char_indices()
+    let byte = line
+        .char_indices()
         .map(|(index, _)| index)
         .nth(column)
-        .unwrap_or(line.len())
+        .unwrap_or(line.len());
+    floor_boundary(line, byte)
 }
 
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+fn grapheme_is_word(grapheme: &str) -> bool {
+    grapheme.chars().next().is_some_and(is_word)
+}
+
+fn grapheme_is_whitespace(grapheme: &str) -> bool {
+    grapheme.chars().all(char::is_whitespace)
+}
+
 fn word_span_at_or_after(line: &str, cursor: usize) -> Option<(usize, usize)> {
     let mut start = None;
-    for (index, c) in line
-        .char_indices()
-        .chain(std::iter::once((line.len(), ' ')))
-    {
-        if is_word(c) {
+    for (index, grapheme) in line.grapheme_indices(true) {
+        if grapheme_is_word(grapheme) {
             start.get_or_insert(index);
-        } else if let Some(word_start) = start.take() {
-            if cursor <= index {
-                return Some((word_start, index));
-            }
+        } else if let Some(word_start) = start.take()
+            && cursor <= index
+        {
+            return Some((word_start, index));
         }
     }
-    None
+    start
+        .filter(|_| cursor <= line.len())
+        .map(|start| (start, line.len()))
 }
 
 fn next_word_start(line: &str, cursor: usize) -> Option<usize> {
     let mut seen_non_word = false;
-    for (index, c) in line.char_indices().filter(|(index, _)| *index > cursor) {
-        if is_word(c) {
+    for (index, grapheme) in line
+        .grapheme_indices(true)
+        .filter(|(index, _)| *index > cursor)
+    {
+        if grapheme_is_word(grapheme) {
             if seen_non_word {
                 return Some(index);
             }
@@ -693,11 +718,11 @@ fn next_word_start(line: &str, cursor: usize) -> Option<usize> {
 fn previous_word_start(line: &str, cursor: usize) -> Option<usize> {
     let mut starts = Vec::new();
     let mut in_word = false;
-    for (index, c) in line.char_indices() {
+    for (index, grapheme) in line.grapheme_indices(true) {
         if index >= cursor {
             break;
         }
-        if is_word(c) {
+        if grapheme_is_word(grapheme) {
             if !in_word {
                 starts.push(index);
             }
@@ -712,8 +737,11 @@ fn previous_word_start(line: &str, cursor: usize) -> Option<usize> {
 fn next_word_end(line: &str, cursor: usize) -> Option<usize> {
     let mut in_word = false;
     let mut last_word = None;
-    for (index, c) in line.char_indices().filter(|(index, _)| *index > cursor) {
-        if is_word(c) {
+    for (index, grapheme) in line
+        .grapheme_indices(true)
+        .filter(|(index, _)| *index > cursor)
+    {
+        if grapheme_is_word(grapheme) {
             in_word = true;
             last_word = Some(index);
         } else if in_word {
@@ -726,11 +754,11 @@ fn next_word_end(line: &str, cursor: usize) -> Option<usize> {
 fn previous_word_end(line: &str, cursor: usize) -> Option<usize> {
     let mut previous = None;
     let mut in_word = false;
-    for (index, c) in line.char_indices() {
+    for (index, grapheme) in line.grapheme_indices(true) {
         if index >= cursor {
             break;
         }
-        if is_word(c) {
+        if grapheme_is_word(grapheme) {
             in_word = true;
             previous = Some(index);
         } else if in_word {
@@ -742,8 +770,11 @@ fn previous_word_end(line: &str, cursor: usize) -> Option<usize> {
 
 fn next_big_word_start(line: &str, cursor: usize) -> Option<usize> {
     let mut seen_space = false;
-    for (index, c) in line.char_indices().filter(|(index, _)| *index > cursor) {
-        if c.is_whitespace() {
+    for (index, grapheme) in line
+        .grapheme_indices(true)
+        .filter(|(index, _)| *index > cursor)
+    {
+        if grapheme_is_whitespace(grapheme) {
             seen_space = true;
         } else if seen_space {
             return Some(index);
@@ -755,11 +786,11 @@ fn next_big_word_start(line: &str, cursor: usize) -> Option<usize> {
 fn previous_big_word_start(line: &str, cursor: usize) -> Option<usize> {
     let mut starts = Vec::new();
     let mut in_word = false;
-    for (index, c) in line.char_indices() {
+    for (index, grapheme) in line.grapheme_indices(true) {
         if index >= cursor {
             break;
         }
-        if c.is_whitespace() {
+        if grapheme_is_whitespace(grapheme) {
             in_word = false;
         } else {
             if !in_word {
@@ -774,8 +805,11 @@ fn previous_big_word_start(line: &str, cursor: usize) -> Option<usize> {
 fn next_big_word_end(line: &str, cursor: usize) -> Option<usize> {
     let mut in_word = false;
     let mut last_word = None;
-    for (index, c) in line.char_indices().filter(|(index, _)| *index > cursor) {
-        if c.is_whitespace() {
+    for (index, grapheme) in line
+        .grapheme_indices(true)
+        .filter(|(index, _)| *index > cursor)
+    {
+        if grapheme_is_whitespace(grapheme) {
             if in_word {
                 return last_word;
             }
@@ -789,11 +823,11 @@ fn next_big_word_end(line: &str, cursor: usize) -> Option<usize> {
 
 fn previous_big_word_end(line: &str, cursor: usize) -> Option<usize> {
     let mut previous = None;
-    for (index, c) in line.char_indices() {
+    for (index, grapheme) in line.grapheme_indices(true) {
         if index >= cursor {
             break;
         }
-        if !c.is_whitespace() {
+        if !grapheme_is_whitespace(grapheme) {
             previous = Some(index);
         }
     }
@@ -828,6 +862,67 @@ mod tests {
         assert_eq!(next_boundary("a中", 1), 4);
         assert_eq!(prev_boundary("a中", 4), 1);
         assert_eq!(floor_boundary("中", 2), 0);
+    }
+
+    #[test]
+    fn moves_and_deletes_on_grapheme_boundaries() {
+        let combined = "e\u{301}x";
+        assert_eq!(next_boundary(combined, 0), 3);
+        assert_eq!(prev_boundary(combined, 3), 0);
+        assert_eq!(floor_boundary(combined, 1), 0);
+
+        let mut buffer = TextBuffer::from_text(combined);
+        buffer.apply(EditCommand::DeleteChar);
+        assert_eq!(buffer.to_text(), "x");
+    }
+
+    #[test]
+    fn inner_word_delete_does_not_split_a_grapheme() {
+        use crate::vim::Vim;
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let mut buffer = TextBuffer::from_text("e\u{301}x");
+        let mut vim = Vim::new();
+        for command in ['d', 'i', 'w'] {
+            assert!(vim.handle_key(
+                &mut buffer,
+                KeyEvent::new(KeyCode::Char(command), KeyModifiers::NONE),
+            ));
+        }
+
+        assert_eq!(buffer.to_text(), "");
+    }
+
+    #[test]
+    fn word_and_big_word_helpers_return_grapheme_boundaries() {
+        let line = "e\u{301} x";
+        let boundaries = line
+            .grapheme_indices(true)
+            .map(|(index, _)| index)
+            .chain(std::iter::once(line.len()))
+            .collect::<Vec<_>>();
+        let word_span = word_span_at_or_after(line, 0).unwrap();
+        let offsets = [
+            word_span.0,
+            word_span.1,
+            next_word_start(line, 0).unwrap(),
+            previous_word_start(line, 4).unwrap(),
+            next_word_end(line, 0).unwrap(),
+            previous_word_end(line, 4).unwrap(),
+            next_big_word_start(line, 0).unwrap(),
+            previous_big_word_start(line, 4).unwrap(),
+            next_big_word_end(line, 0).unwrap(),
+            previous_big_word_end(line, 4).unwrap(),
+        ];
+
+        assert_eq!(word_span, (0, 3));
+        assert!(offsets.iter().all(|offset| boundaries.contains(offset)));
+
+        let mut buffer = TextBuffer::from_text("e\u{301}");
+        buffer.apply(EditCommand::MoveLastNonBlank);
+        assert_eq!(buffer.cursor_byte(), 0);
     }
 
     #[test]

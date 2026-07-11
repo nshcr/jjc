@@ -2,6 +2,8 @@ use std::env;
 use std::io;
 use std::process::Command;
 
+pub const TESTED_JJ_PROTOCOL_BASELINE: &str = "0.43.0";
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct DoctorReport {
     pub jj_version: Option<String>,
@@ -28,6 +30,9 @@ impl DoctorReport {
             }
         }
         text.push_str(&format!("ok jjc: {}\n\n", self.jjc_program));
+        text.push_str(&format!(
+            "tested jj protocol baseline: {TESTED_JJ_PROTOCOL_BASELINE}\n\n"
+        ));
         text.push_str("recommended jj config:\n");
         text.push_str(&recommended_config(&self.jjc_program));
         text
@@ -84,7 +89,9 @@ fn recommended_config(program: &str) -> String {
          [merge-tools.jjc]\n\
          program = {program}\n\
          edit-args = [\"diff\", \"$left\", \"$right\", \"$output\"]\n\
-         merge-args = [\"merge\", \"$left\", \"$base\", \"$right\", \"$output\", \"--marker-length\", \"$marker_length\", \"--path\", \"$path\"]\n"
+         merge-args = [\"merge\", \"$left\", \"$base\", \"$right\", \"$output\", \"--marker-length\", \"$marker_length\", \"--path\", \"$path\"]\n\
+         merge-tool-edits-conflict-markers = true\n\
+         conflict-marker-style = \"git\"\n"
     )
 }
 
@@ -106,6 +113,27 @@ mod tests {
     }
 
     #[test]
+    fn recommended_config_prefills_git_conflict_markers() {
+        let program = "/tmp/jjc with spaces";
+        let config: toml::Value = toml::from_str(&recommended_config(program)).unwrap();
+        let ui = &config["ui"];
+        let tool = &config["merge-tools"]["jjc"];
+
+        assert_eq!(ui["editor"][0].as_str(), Some(program));
+        assert_eq!(ui["editor"][1].as_str(), Some("edit"));
+        assert_eq!(ui["diff-editor"].as_str(), Some("jjc"));
+        assert_eq!(ui["merge-editor"].as_str(), Some("jjc"));
+        assert_eq!(tool["program"].as_str(), Some(program));
+        assert_eq!(tool["edit-args"][0].as_str(), Some("diff"));
+        assert_eq!(tool["merge-args"][0].as_str(), Some("merge"));
+        assert_eq!(
+            tool["merge-tool-edits-conflict-markers"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(tool["conflict-marker-style"].as_str(), Some("git"));
+    }
+
+    #[test]
     fn missing_jj_report_is_not_ok() {
         let report = DoctorReport {
             jj_version: None,
@@ -115,6 +143,11 @@ mod tests {
 
         assert!(!report.ok());
         assert!(report.text().contains("missing jj: not found"));
+        assert!(
+            report
+                .text()
+                .contains("tested jj protocol baseline: 0.43.0")
+        );
         assert!(report.text().contains("recommended jj config:"));
     }
 }

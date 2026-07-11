@@ -83,6 +83,86 @@ fn jj_describe_empty_message_warns_before_save() -> io::Result<()> {
 }
 
 #[test]
+fn jj_sparse_edit_can_save_an_empty_pattern_set() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("sparse-empty")?;
+
+    let output = jj(&repo)
+        .env("JJC_KEYS", "dd:wq<Enter>")
+        .arg("--config")
+        .arg(format!("ui.editor=[{},\"edit\"]", toml_string(jjc())))
+        .args(["sparse", "edit"])
+        .output()?;
+    assert_success(output);
+
+    let output = jj(&repo).args(["sparse", "list"]).output()?;
+    assert_success_ref(&output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    Ok(())
+}
+
+#[test]
+fn doctor_generated_config_reaches_edit_diff_and_merge_routes() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let edit_repo = init_repo("doctor-config-edit")?;
+    let config_path = edit_repo
+        .parent()
+        .expect("test repository has a parent")
+        .join("jjc.toml");
+    let doctor = Command::new(jjc()).arg("doctor").output()?;
+    assert_success_ref(&doctor);
+    let doctor_text = String::from_utf8_lossy(&doctor.stdout);
+    let (_, config) = doctor_text
+        .split_once("recommended jj config:\n")
+        .expect("doctor prints a recommended config block");
+    toml::from_str::<toml::Value>(config).expect("doctor config is valid TOML");
+    fs::write(&config_path, config)?;
+
+    let output = jj(&edit_repo)
+        .env("JJC_KEYS", "iDoctor config<Esc>:wq<Enter>")
+        .arg("--config-file")
+        .arg(&config_path)
+        .args(["describe", "--editor"])
+        .output()?;
+    assert_success(output);
+    let output = jj(&edit_repo)
+        .args(["log", "-r", "@", "--no-graph", "-T", "description"])
+        .output()?;
+    assert_success_ref(&output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Doctor config\n");
+
+    let diff_repo = init_repo("doctor-config-diff")?;
+    fs::write(diff_repo.join("file.txt"), "old\n")?;
+    assert_success(jj(&diff_repo).args(["describe", "-m", "base"]).output()?);
+    assert_success(jj(&diff_repo).args(["new", "-m", "work"]).output()?);
+    fs::write(diff_repo.join("file.txt"), "new\n")?;
+    let output = jj(&diff_repo)
+        .env("JJC_KEYS", "w")
+        .arg("--config-file")
+        .arg(&config_path)
+        .args(["split", "-m", "selected"])
+        .output()?;
+    assert_success(output);
+
+    let merge_repo = conflict_repo("doctor-config-merge")?;
+    let output = jj(&merge_repo)
+        .env("JJC_KEYS", "3:wq<Enter>")
+        .arg("--config-file")
+        .arg(&config_path)
+        .args(["resolve", "root:file.txt"])
+        .output()?;
+    assert_success(output);
+    let output = jj(&merge_repo).args(["resolve", "--list"]).output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("No conflicts found"));
+    Ok(())
+}
+
+#[test]
 fn jj_restore_uses_jjc_diff_editor() -> io::Result<()> {
     if !jj_available() {
         return Ok(());
@@ -591,7 +671,11 @@ fn jj_resolve_multi_side_conflict_stays_protocol_limited() -> io::Result<()> {
 }
 
 fn jj_available() -> bool {
-    Command::new("jj").arg("--version").output().is_ok()
+    let available = Command::new("jj").arg("--version").output().is_ok();
+    if !available && std::env::var_os("JJC_REQUIRE_INTEGRATION").is_some() {
+        panic!("jj is required when JJC_REQUIRE_INTEGRATION is set");
+    }
+    available
 }
 
 fn init_repo(name: &str) -> io::Result<PathBuf> {

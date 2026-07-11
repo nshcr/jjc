@@ -8,7 +8,7 @@ use serde::Deserialize;
 use crate::theme::Theme;
 use crate::theme::ThemeConfig;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AppConfig {
     pub syntax: SyntaxConfig,
     pub theme: Theme,
@@ -27,15 +27,6 @@ struct RawConfig {
     theme: ThemeConfig,
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            syntax: SyntaxConfig::default(),
-            theme: Theme::default(),
-        }
-    }
-}
-
 impl Default for SyntaxConfig {
     fn default() -> Self {
         Self { enabled: true }
@@ -50,7 +41,7 @@ impl AppConfig {
         if !path.exists() {
             return Ok(Self::default());
         }
-        Self::from_str(&fs::read_to_string(&path)?).map_err(|message| {
+        Self::parse(&fs::read_to_string(&path)?).map_err(|message| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("{}: {message}", path.display()),
@@ -58,7 +49,7 @@ impl AppConfig {
         })
     }
 
-    pub fn from_str(text: &str) -> Result<Self, String> {
+    pub fn parse(text: &str) -> Result<Self, String> {
         let raw: RawConfig = toml::from_str(text).map_err(|err| err.to_string())?;
         Ok(Self {
             syntax: raw.syntax,
@@ -91,7 +82,7 @@ mod tests {
 
     #[test]
     fn parses_syntax_and_theme_config() {
-        let config = AppConfig::from_str(
+        let config = AppConfig::parse(
             r##"
             [syntax]
             enabled = false

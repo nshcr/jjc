@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str;
@@ -27,10 +28,15 @@ use similar::TextDiff;
 use crate::buffer::TextBuffer;
 use crate::config::AppConfig;
 use crate::input;
-use crate::render::StyledText;
+use crate::render::StyledTextCache;
+use crate::render::TAB_WIDTH;
+use crate::render::display_boundary_at_or_after;
+use crate::render::display_width;
+use crate::render::is_large_content;
 use crate::render::set_vim_cursor_style;
 use crate::scroll::ViewScroll;
 use crate::scroll::scrollbar_area;
+use crate::scroll::terminal_offset;
 use crate::syntax;
 use crate::vim::Vim;
 use crate::vim::VimMode;
@@ -58,20 +64,51 @@ enum Mode {
 struct DiffFile {
     path: PathBuf,
     kind: DiffFileKind,
+    left_entry: TreeEntry,
+    right_entry: TreeEntry,
     left_lines: Vec<String>,
     right_lines: Vec<String>,
     hunks: Vec<Hunk>,
     manual_output: Option<TextBuffer>,
+    left_cache: StyledTextCache,
+    right_cache: StyledTextCache,
+    manual_cache: StyledTextCache,
     unsupported: Option<String>,
 }
 
+struct ChangedPath {
+    path: PathBuf,
+    left: TreeEntry,
+    right: TreeEntry,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum DiffFileKind {
     ModifiedText,
     AddedText,
     DeletedText,
-    ModifiedBinary { left: Vec<u8>, right: Vec<u8> },
-    AddedBinary { right: Vec<u8> },
-    DeletedBinary { left: Vec<u8> },
+    ModifiedBinary,
+    AddedBinary,
+    DeletedBinary,
+    EntryChange,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TreeEntry {
+    Missing,
+    File { contents: Vec<u8>, executable: bool },
+    Symlink { target: PathBuf },
+    Directory,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TreeEntryKind {
+    Missing,
+    File,
+    Symlink,
+    Directory,
+    Other,
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +118,7 @@ struct Entry {
 }
 
 struct Hunk {
+    role: HunkRole,
     old_start: usize,
     old_end: usize,
     new_start: usize,
@@ -89,6 +127,13 @@ struct Hunk {
     rows: Vec<DiffRow>,
     function: Option<String>,
     summary: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HunkRole {
+    Content,
+    Executable,
+    Entry,
 }
 
 struct DiffRow {
@@ -113,8 +158,8 @@ impl DiffApp {
         let mut files = Vec::new();
         let mut entries = Vec::new();
 
-        for path in paths {
-            let file = DiffFile::load(&left, &right, path)?;
+        for changed in paths {
+            let file = DiffFile::load(changed.path, changed.left, changed.right)?;
             let file_index = files.len();
             for hunk_index in 0..file.hunks.len() {
                 entries.push(Entry {
@@ -149,14 +194,53 @@ impl DiffApp {
                     .constraints([Constraint::Min(1), Constraint::Length(1)])
                     .split(frame.area());
                 let height = rows[0].height.saturating_sub(2) as usize;
+                let width = rows[0].width.saturating_sub(2) as usize;
                 let line_count = self.line_count();
                 self.scroll
                     .keep_visible(self.cursor_line_index(), line_count, height);
+                let cursor_column = if self.mode == Mode::Edit {
+                    self.current_edit_buffer()
+                        .map(|buffer| {
+                            display_width(&buffer.current_line()[..buffer.cursor_byte()], TAB_WIDTH)
+                        })
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                let content_width = if self.mode == Mode::Edit {
+                    self.current_edit_buffer()
+                        .map(|buffer| {
+                            buffer
+                                .lines()
+                                .iter()
+                                .map(|line| display_width(line, TAB_WIDTH))
+                                .max()
+                                .unwrap_or(0)
+                        })
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                self.scroll
+                    .keep_column_visible(cursor_column, content_width, width);
+                let safe_horizontal_offset = self.current_edit_buffer().map(|buffer| {
+                    display_boundary_at_or_after(
+                        buffer.current_line(),
+                        self.scroll.horizontal_offset(),
+                        TAB_WIDTH,
+                    )
+                });
+                if let Some(offset) = safe_horizontal_offset {
+                    self.scroll.set_horizontal_offset(offset);
+                }
                 let mut scrollbar_state = self.scroll.scrollbar_state(line_count, height);
                 let lines = self.lines();
                 frame.render_widget(
                     Paragraph::new(lines)
-                        .scroll((self.scroll.offset() as u16, 0))
+                        .scroll((
+                            terminal_offset(self.scroll.offset()),
+                            terminal_offset(self.scroll.horizontal_offset()),
+                        ))
                         .block(Block::bordered().title("jjc diff")),
                     rows[0],
                 );
@@ -166,15 +250,8 @@ impl DiffApp {
                     &mut scrollbar_state,
                 );
                 frame.render_widget(Paragraph::new(self.status()), rows[1]);
-                if self.mode == Mode::Edit
-                    && let Some(buffer) = self.current_edit_buffer()
-                {
-                    let x = rows[0].x
-                        + 1
-                        + buffer
-                            .cursor_column()
-                            .min(rows[0].width.saturating_sub(2) as usize)
-                            as u16;
+                if self.mode == Mode::Edit && self.current_edit_buffer().is_some() {
+                    let x = rows[0].x + 1 + self.scroll.visible_column(cursor_column, width) as u16;
                     let y = rows[0].y
                         + 1
                         + self.scroll.visible_line(self.cursor_line_index(), height) as u16;
@@ -247,7 +324,7 @@ impl DiffApp {
         self.edit_vim.handle_key(buffer, key);
     }
 
-    fn lines(&self) -> Vec<Line<'static>> {
+    fn lines(&mut self) -> Vec<Line<'static>> {
         if self.files.is_empty() {
             return vec![Line::from("no changed files")];
         }
@@ -256,20 +333,23 @@ impl DiffApp {
             let Some(entry) = self.entries.get(self.cursor) else {
                 return vec![Line::from("no editable file")];
             };
-            let file = &self.files[entry.file];
+            let file = &mut self.files[entry.file];
             let mut lines = vec![Line::from(Span::styled(
                 format!("editing {}", file.path.display()),
                 Style::new().add_modifier(Modifier::BOLD),
             ))];
             if let Some(buffer) = &file.manual_output {
-                lines.extend(StyledText::new(&file.path, buffer.lines(), &self.config).lines());
+                lines.extend(
+                    file.manual_cache
+                        .lines(&file.path, buffer.lines(), &self.config),
+                );
             }
             return lines;
         }
 
         let mut lines = Vec::new();
         let mut entry_index = 0;
-        for (file_index, file) in self.files.iter().enumerate() {
+        for (file_index, file) in self.files.iter_mut().enumerate() {
             lines.push(Line::from(Span::styled(
                 format!("{}  {}", file.path.display(), file.selection_summary()),
                 Style::new().add_modifier(Modifier::BOLD),
@@ -283,8 +363,12 @@ impl DiffApp {
             }
             let left_display_lines = display_lines(&file.left_lines);
             let right_display_lines = display_lines(&file.right_lines);
-            let left_styled = StyledText::new(&file.path, &left_display_lines, &self.config);
-            let right_styled = StyledText::new(&file.path, &right_display_lines, &self.config);
+            let left_styled = file
+                .left_cache
+                .lines(&file.path, &left_display_lines, &self.config);
+            let right_styled =
+                file.right_cache
+                    .lines(&file.path, &right_display_lines, &self.config);
             for (hunk_index, hunk) in file.hunks.iter().enumerate() {
                 let marker = if hunk.selected { "[x]" } else { "[ ]" };
                 let prefix = if self
@@ -319,21 +403,15 @@ impl DiffApp {
                             DiffRowKind::Insert { .. } => format!("  {cursor} {marker} +"),
                         };
                         lines.push(match row.kind {
-                            DiffRowKind::Equal { new_index } => right_styled.line_with_prefix(
-                                new_index,
-                                prefix,
-                                &right_display_lines[new_index],
-                            ),
-                            DiffRowKind::Delete { old_index } => left_styled.line_with_prefix(
-                                old_index,
-                                prefix,
-                                &left_display_lines[old_index],
-                            ),
-                            DiffRowKind::Insert { new_index } => right_styled.line_with_prefix(
-                                new_index,
-                                prefix,
-                                &right_display_lines[new_index],
-                            ),
+                            DiffRowKind::Equal { new_index } => {
+                                line_with_prefix(&right_styled, new_index, prefix)
+                            }
+                            DiffRowKind::Delete { old_index } => {
+                                line_with_prefix(&left_styled, old_index, prefix)
+                            }
+                            DiffRowKind::Insert { new_index } => {
+                                line_with_prefix(&right_styled, new_index, prefix)
+                            }
                         });
                     }
                 }
@@ -346,15 +424,22 @@ impl DiffApp {
         lines
     }
 
-    fn status(&self) -> &'static str {
+    fn status(&self) -> String {
         match self.mode {
             Mode::Select => {
-                "j/k hunk  [/ ] file  n/p/PgUp/PgDn line  space/x toggle  S/D file  f function  e edit output  u/r undo redo  w write  q cancel"
+                "j/k hunk  [/ ] file  n/p/PgUp/PgDn line  space/x toggle  S/D file  f function  e edit output  u/r undo redo  w write  q cancel".to_owned()
+            }
+            Mode::Edit
+                if self
+                    .current_edit_buffer()
+                    .is_some_and(|buffer| is_large_content(buffer.lines())) =>
+            {
+                "EDIT OUTPUT  PLAIN LARGE FILE  syntax disabled  Esc select".to_owned()
             }
             Mode::Edit if self.edit_vim.mode() == VimMode::Normal => {
-                "EDIT OUTPUT NORMAL  i/a/o insert  h/j/k/l/w/b/e move  x/dd delete  Esc select"
+                "EDIT OUTPUT NORMAL  i/a/o insert  h/j/k/l/w/b/e move  x/dd delete  Esc select".to_owned()
             }
-            Mode::Edit => "EDIT OUTPUT INSERT  Esc normal",
+            Mode::Edit => "EDIT OUTPUT INSERT  Esc normal".to_owned(),
         }
     }
 
@@ -626,103 +711,175 @@ impl DiffApp {
                     format!("unsupported diff file {}: {reason}", file.path.display()),
                 ));
             }
-            let path = self.output.join(&file.path);
-            if let Some(bytes) = file.render() {
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(path, bytes)?;
-            } else if path.exists() {
-                fs::remove_file(path)?;
-            }
+        }
+
+        let entries = self
+            .files
+            .iter()
+            .map(DiffFile::materialize)
+            .collect::<io::Result<Vec<_>>>()?;
+        for entry in &entries {
+            validate_output_entry(entry)?;
+        }
+        for file in &self.files {
+            validate_output_path(&self.output, &file.path)?;
+        }
+        for (file, entry) in self.files.iter().zip(entries) {
+            write_tree_entry(&self.output.join(&file.path), entry)?;
         }
         Ok(())
     }
 }
 
 impl DiffFile {
-    fn load(left_root: &Path, right_root: &Path, path: PathBuf) -> io::Result<Self> {
-        let left_path = left_root.join(&path);
-        let right_path = right_root.join(&path);
-        match (left_path.is_file(), right_path.is_file()) {
-            (true, true) => Self::load_modified(path, &left_path, &right_path),
-            (false, true) if !left_path.exists() => Self::load_added(path, &right_path),
-            (true, false) if !right_path.exists() => Self::load_deleted(path, &left_path),
-            _ => Ok(Self::unsupported(path, "only normal files are supported")),
+    fn load(path: PathBuf, left_entry: TreeEntry, right_entry: TreeEntry) -> io::Result<Self> {
+        match (left_entry.kind(), right_entry.kind()) {
+            (TreeEntryKind::File, TreeEntryKind::File) => {
+                Self::load_modified(path, left_entry, right_entry)
+            }
+            (TreeEntryKind::Missing, TreeEntryKind::File) => {
+                Self::load_added(path, left_entry, right_entry)
+            }
+            (TreeEntryKind::File, TreeEntryKind::Missing) => {
+                Self::load_deleted(path, left_entry, right_entry)
+            }
+            (TreeEntryKind::Symlink, TreeEntryKind::Symlink)
+            | (TreeEntryKind::Missing, TreeEntryKind::Symlink)
+            | (TreeEntryKind::Symlink, TreeEntryKind::Missing)
+            | (TreeEntryKind::File, TreeEntryKind::Symlink)
+            | (TreeEntryKind::Symlink, TreeEntryKind::File) => {
+                Ok(Self::entry_change(path, left_entry, right_entry))
+            }
+            _ => {
+                let reason = format!(
+                    "tree entry change {} -> {} is not supported",
+                    left_entry.kind().name(),
+                    right_entry.kind().name()
+                );
+                Ok(Self::unsupported(path, left_entry, right_entry, reason))
+            }
         }
     }
 
-    fn load_modified(path: PathBuf, left_path: &Path, right_path: &Path) -> io::Result<Self> {
-        let left_bytes = fs::read(left_path)?;
-        let right_bytes = fs::read(right_path)?;
-        let (left, right) = match (str::from_utf8(&left_bytes), str::from_utf8(&right_bytes)) {
-            (Ok(left), Ok(right)) => (left, right),
+    fn load_modified(
+        path: PathBuf,
+        left_entry: TreeEntry,
+        right_entry: TreeEntry,
+    ) -> io::Result<Self> {
+        let (left_bytes, left_executable) = left_entry.file().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "left entry is not a file")
+        })?;
+        let (right_bytes, right_executable) = right_entry.file().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "right entry is not a file")
+        })?;
+        let mut metadata_hunks = Vec::new();
+        if left_executable != right_executable {
+            metadata_hunks.push(executable_hunk(left_executable, right_executable));
+        }
+
+        match (str::from_utf8(left_bytes), str::from_utf8(right_bytes)) {
+            (Ok(left), Ok(right)) => {
+                let left_lines = split_keep_newline(left);
+                let right_lines = split_keep_newline(right);
+                let mut hunks = if left_bytes == right_bytes {
+                    Vec::new()
+                } else {
+                    hunks(&path, left, right)
+                };
+                hunks.extend(metadata_hunks);
+                Ok(Self::new(
+                    path,
+                    DiffFileKind::ModifiedText,
+                    left_entry,
+                    right_entry,
+                    left_lines,
+                    right_lines,
+                    hunks,
+                ))
+            }
             _ => {
-                return Ok(Self::binary(
+                let mut hunks = if left_bytes == right_bytes {
+                    Vec::new()
+                } else {
+                    vec![whole_file_hunk("binary file", HunkRole::Content)]
+                };
+                hunks.extend(metadata_hunks);
+                Ok(Self::new(
                     path,
-                    DiffFileKind::ModifiedBinary {
-                        left: left_bytes,
-                        right: right_bytes,
-                    },
-                    "binary file",
-                ));
+                    DiffFileKind::ModifiedBinary,
+                    left_entry,
+                    right_entry,
+                    Vec::new(),
+                    Vec::new(),
+                    hunks,
+                ))
             }
-        };
-
-        Ok(Self::text(
-            path.clone(),
-            DiffFileKind::ModifiedText,
-            split_keep_newline(left),
-            split_keep_newline(right),
-            hunks(&path, left, right),
-        ))
+        }
     }
 
-    fn load_added(path: PathBuf, right_path: &Path) -> io::Result<Self> {
-        let right_bytes = fs::read(right_path)?;
-        let right = match str::from_utf8(&right_bytes) {
-            Ok(right) => right,
-            Err(_) => {
-                return Ok(Self::binary(
-                    path,
-                    DiffFileKind::AddedBinary { right: right_bytes },
-                    "added binary file",
-                ));
-            }
+    fn load_added(
+        path: PathBuf,
+        left_entry: TreeEntry,
+        right_entry: TreeEntry,
+    ) -> io::Result<Self> {
+        let (right_bytes, _) = right_entry.file().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "added entry is not a file")
+        })?;
+        let (kind, right_lines, summary) = match str::from_utf8(right_bytes) {
+            Ok(right) => (
+                DiffFileKind::AddedText,
+                split_keep_newline(right),
+                "added file",
+            ),
+            Err(_) => (DiffFileKind::AddedBinary, Vec::new(), "added binary file"),
         };
-        Ok(Self::text(
+        Ok(Self::new(
             path,
-            DiffFileKind::AddedText,
+            kind,
+            left_entry,
+            right_entry,
             Vec::new(),
-            split_keep_newline(right),
-            vec![whole_file_hunk("added file")],
+            right_lines,
+            vec![whole_file_hunk(summary, HunkRole::Entry)],
         ))
     }
 
-    fn load_deleted(path: PathBuf, left_path: &Path) -> io::Result<Self> {
-        let left_bytes = fs::read(left_path)?;
-        let left = match str::from_utf8(&left_bytes) {
-            Ok(left) => left,
-            Err(_) => {
-                return Ok(Self::binary(
-                    path,
-                    DiffFileKind::DeletedBinary { left: left_bytes },
-                    "deleted binary file",
-                ));
-            }
+    fn load_deleted(
+        path: PathBuf,
+        left_entry: TreeEntry,
+        right_entry: TreeEntry,
+    ) -> io::Result<Self> {
+        let (left_bytes, _) = left_entry.file().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "deleted entry is not a file")
+        })?;
+        let (kind, left_lines, summary) = match str::from_utf8(left_bytes) {
+            Ok(left) => (
+                DiffFileKind::DeletedText,
+                split_keep_newline(left),
+                "deleted file",
+            ),
+            Err(_) => (
+                DiffFileKind::DeletedBinary,
+                Vec::new(),
+                "deleted binary file",
+            ),
         };
-        Ok(Self::text(
+        Ok(Self::new(
             path,
-            DiffFileKind::DeletedText,
-            split_keep_newline(left),
+            kind,
+            left_entry,
+            right_entry,
+            left_lines,
             Vec::new(),
-            vec![whole_file_hunk("deleted file")],
+            vec![whole_file_hunk(summary, HunkRole::Entry)],
         ))
     }
 
-    fn text(
+    fn new(
         path: PathBuf,
         kind: DiffFileKind,
+        left_entry: TreeEntry,
+        right_entry: TreeEntry,
         left_lines: Vec<String>,
         right_lines: Vec<String>,
         hunks: Vec<Hunk>,
@@ -730,69 +887,128 @@ impl DiffFile {
         Self {
             path,
             kind,
+            left_entry,
+            right_entry,
             left_lines,
             right_lines,
             hunks,
             manual_output: None,
+            left_cache: StyledTextCache::default(),
+            right_cache: StyledTextCache::default(),
+            manual_cache: StyledTextCache::default(),
             unsupported: None,
         }
     }
 
-    fn binary(path: PathBuf, kind: DiffFileKind, summary: impl Into<String>) -> Self {
-        Self::text(
+    fn entry_change(path: PathBuf, left_entry: TreeEntry, right_entry: TreeEntry) -> Self {
+        let summary = match (left_entry.kind(), right_entry.kind()) {
+            (TreeEntryKind::Symlink, TreeEntryKind::Symlink) => "symlink target changed".to_owned(),
+            (TreeEntryKind::Missing, TreeEntryKind::Symlink) => "added symlink".to_owned(),
+            (TreeEntryKind::Symlink, TreeEntryKind::Missing) => "deleted symlink".to_owned(),
+            (left, right) => format!("file type changed: {} -> {}", left.name(), right.name()),
+        };
+        Self::new(
             path,
-            kind,
+            DiffFileKind::EntryChange,
+            left_entry,
+            right_entry,
             Vec::new(),
             Vec::new(),
-            vec![whole_file_hunk(summary)],
+            vec![whole_file_hunk(summary, HunkRole::Entry)],
         )
     }
 
-    fn unsupported(path: PathBuf, reason: impl Into<String>) -> Self {
+    fn unsupported(
+        path: PathBuf,
+        left_entry: TreeEntry,
+        right_entry: TreeEntry,
+        reason: impl Into<String>,
+    ) -> Self {
         Self {
             path,
             kind: DiffFileKind::ModifiedText,
+            left_entry,
+            right_entry,
             left_lines: Vec::new(),
             right_lines: Vec::new(),
             hunks: Vec::new(),
             manual_output: None,
+            left_cache: StyledTextCache::default(),
+            right_cache: StyledTextCache::default(),
+            manual_cache: StyledTextCache::default(),
             unsupported: Some(reason.into()),
         }
     }
 
+    fn materialize(&self) -> io::Result<TreeEntry> {
+        match self.kind {
+            DiffFileKind::ModifiedText => Ok(TreeEntry::File {
+                contents: self
+                    .manual_output
+                    .as_ref()
+                    .map(|output| output.to_text())
+                    .unwrap_or_else(|| self.render_selection())
+                    .into_bytes(),
+                executable: self.selected_executable()?,
+            }),
+            DiffFileKind::ModifiedBinary => {
+                let (left, _) = self.left_entry.file().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "left entry is not a file")
+                })?;
+                let (right, _) = self.right_entry.file().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "right entry is not a file")
+                })?;
+                let contents = if self.role_selected(HunkRole::Content) {
+                    right.to_vec()
+                } else {
+                    left.to_vec()
+                };
+                Ok(TreeEntry::File {
+                    contents,
+                    executable: self.selected_executable()?,
+                })
+            }
+            DiffFileKind::AddedText
+            | DiffFileKind::DeletedText
+            | DiffFileKind::AddedBinary
+            | DiffFileKind::DeletedBinary
+            | DiffFileKind::EntryChange => {
+                if self.role_selected(HunkRole::Entry) {
+                    Ok(self.right_entry.clone())
+                } else {
+                    Ok(self.left_entry.clone())
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
     fn render(&self) -> Option<Vec<u8>> {
-        if let Some(output) = &self.manual_output {
-            return Some(output.to_text().into_bytes());
+        match self.materialize().unwrap() {
+            TreeEntry::File { contents, .. } => Some(contents),
+            _ => None,
         }
-        match &self.kind {
-            DiffFileKind::ModifiedText => Some(self.render_selection().into_bytes()),
-            DiffFileKind::AddedText => self
-                .hunks
-                .first()
-                .is_none_or(|hunk| hunk.selected)
-                .then(|| self.right_lines.concat().into_bytes()),
-            DiffFileKind::DeletedText => self
-                .hunks
-                .first()
-                .is_some_and(|hunk| !hunk.selected)
-                .then(|| self.left_lines.concat().into_bytes()),
-            DiffFileKind::ModifiedBinary { left, right } => self
-                .hunks
-                .first()
-                .is_none_or(|hunk| hunk.selected)
-                .then(|| right.clone())
-                .or_else(|| Some(left.clone())),
-            DiffFileKind::AddedBinary { right } => self
-                .hunks
-                .first()
-                .is_none_or(|hunk| hunk.selected)
-                .then(|| right.clone()),
-            DiffFileKind::DeletedBinary { left } => self
-                .hunks
-                .first()
-                .is_some_and(|hunk| !hunk.selected)
-                .then(|| left.clone()),
-        }
+    }
+
+    fn role_selected(&self, role: HunkRole) -> bool {
+        self.hunks
+            .iter()
+            .find(|hunk| hunk.role == role)
+            .is_none_or(|hunk| hunk.selected)
+    }
+
+    fn selected_executable(&self) -> io::Result<bool> {
+        let (_, left) = self.left_entry.file().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "left entry is not a file")
+        })?;
+        let (_, right) = self.right_entry.file().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "right entry is not a file")
+        })?;
+        Ok(if self.role_selected(HunkRole::Executable) {
+            right
+        } else {
+            left
+        })
     }
 
     fn render_selection(&self) -> String {
@@ -800,18 +1016,20 @@ impl DiffFile {
             DiffFileKind::ModifiedText => {
                 render_hunks(&self.left_lines, &self.right_lines, &self.hunks)
             }
-            DiffFileKind::AddedText => self
-                .hunks
-                .first()
-                .is_none_or(|hunk| hunk.selected)
-                .then(|| self.right_lines.concat())
-                .unwrap_or_default(),
-            DiffFileKind::DeletedText => self
-                .hunks
-                .first()
-                .is_some_and(|hunk| !hunk.selected)
-                .then(|| self.left_lines.concat())
-                .unwrap_or_default(),
+            DiffFileKind::AddedText => {
+                if self.role_selected(HunkRole::Entry) {
+                    self.right_lines.concat()
+                } else {
+                    String::new()
+                }
+            }
+            DiffFileKind::DeletedText => {
+                if self.role_selected(HunkRole::Entry) {
+                    String::new()
+                } else {
+                    self.left_lines.concat()
+                }
+            }
             _ => String::new(),
         }
     }
@@ -826,6 +1044,246 @@ impl DiffFile {
     }
 }
 
+impl TreeEntry {
+    fn kind(&self) -> TreeEntryKind {
+        match self {
+            Self::Missing => TreeEntryKind::Missing,
+            Self::File { .. } => TreeEntryKind::File,
+            Self::Symlink { .. } => TreeEntryKind::Symlink,
+            Self::Directory => TreeEntryKind::Directory,
+            Self::Other => TreeEntryKind::Other,
+        }
+    }
+
+    fn file(&self) -> Option<(&[u8], bool)> {
+        match self {
+            Self::File {
+                contents,
+                executable,
+            } => Some((contents, *executable)),
+            _ => None,
+        }
+    }
+}
+
+impl TreeEntryKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::File => "normal file",
+            Self::Symlink => "symlink",
+            Self::Directory => "directory",
+            Self::Other => "special file",
+        }
+    }
+}
+
+fn read_tree_entry(path: &Path) -> io::Result<TreeEntry> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(TreeEntry::Missing);
+        }
+        Err(err) => return Err(err),
+    };
+    let file_type = metadata.file_type();
+    if file_type.is_file() {
+        Ok(TreeEntry::File {
+            contents: fs::read(path)?,
+            executable: metadata_is_executable(&metadata),
+        })
+    } else if file_type.is_symlink() {
+        Ok(TreeEntry::Symlink {
+            target: fs::read_link(path)?,
+        })
+    } else if file_type.is_dir() {
+        Ok(TreeEntry::Directory)
+    } else {
+        Ok(TreeEntry::Other)
+    }
+}
+
+#[cfg(unix)]
+fn metadata_is_executable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn metadata_is_executable(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+fn validate_output_entry(entry: &TreeEntry) -> io::Result<()> {
+    match entry {
+        TreeEntry::Directory | TreeEntry::Other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cannot materialize an unsupported tree entry",
+        )),
+        #[cfg(not(unix))]
+        TreeEntry::Symlink { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "symlink diff output is only supported on Unix",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn validate_output_path(root: &Path, relative: &Path) -> io::Result<()> {
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsafe diff output path: {}", relative.display()),
+        ));
+    }
+
+    let root_metadata = fs::symlink_metadata(root)?;
+    if !root_metadata.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("diff output root is not a directory: {}", root.display()),
+        ));
+    }
+
+    let mut current = root.to_owned();
+    if let Some(parent) = relative.parent() {
+        for component in parent.components() {
+            let Component::Normal(component) = component else {
+                continue;
+            };
+            current.push(component);
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_dir() => {}
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "refusing to traverse non-directory diff output ancestor: {}",
+                            current.display()
+                        ),
+                    ));
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotFound => break,
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    let target = root.join(relative);
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_dir() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to replace directory diff output entry: {}",
+                target.display()
+            ),
+        )),
+        Ok(_) => Ok(()),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn write_tree_entry(path: &Path, entry: TreeEntry) -> io::Result<()> {
+    match entry {
+        TreeEntry::Missing => remove_output_entry(path),
+        TreeEntry::File {
+            contents,
+            executable,
+        } => {
+            remove_output_entry(path)?;
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(path, contents)?;
+            set_executable(path, executable)
+        }
+        TreeEntry::Symlink { target } => {
+            remove_output_entry(path)?;
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            write_symlink(&target, path)
+        }
+        TreeEntry::Directory | TreeEntry::Other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("cannot write unsupported tree entry: {}", path.display()),
+        )),
+    }
+}
+
+fn remove_output_entry(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    let file_type = metadata.file_type();
+    if file_type.is_file() || file_type.is_symlink() {
+        fs::remove_file(path)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to replace unsupported output entry: {}",
+                path.display()
+            ),
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path, executable: bool) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::symlink_metadata(path)?.permissions();
+    let mode = permissions.mode();
+    permissions.set_mode(if executable {
+        mode | 0o111
+    } else {
+        mode & !0o111
+    });
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path, _executable: bool) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_symlink(target: &Path, path: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, path)
+}
+
+#[cfg(not(unix))]
+fn write_symlink(_target: &Path, _path: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "symlink diff output is only supported on Unix",
+    ))
+}
+
 fn display_lines(lines: &[String]) -> Vec<String> {
     lines
         .iter()
@@ -833,31 +1291,41 @@ fn display_lines(lines: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn changed_paths(left: &Path, right: &Path) -> io::Result<Vec<PathBuf>> {
+fn line_with_prefix(
+    lines: &[Line<'static>],
+    index: usize,
+    prefix: impl Into<String>,
+) -> Line<'static> {
+    let mut line = lines.get(index).cloned().unwrap_or_default();
+    line.spans.insert(0, Span::raw(prefix.into()));
+    line
+}
+
+fn changed_paths(left: &Path, right: &Path) -> io::Result<Vec<ChangedPath>> {
     let mut paths = BTreeSet::new();
     collect_paths(left, left, &mut paths)?;
     collect_paths(right, right, &mut paths)?;
-    Ok(paths
-        .into_iter()
-        .filter(|path| {
-            let left_path = left.join(path);
-            let right_path = right.join(path);
-            let left_file = left_path.is_file();
-            let right_file = right_path.is_file();
-            left_path.exists() != right_path.exists()
-                || left_file != right_file
-                || (left_path.is_file()
-                    && right_path.is_file()
-                    && fs::read(left_path).ok() != fs::read(right_path).ok())
-        })
-        .collect())
+    let mut changed = Vec::new();
+    for path in paths {
+        let left_entry = read_tree_entry(&left.join(&path))?;
+        let right_entry = read_tree_entry(&right.join(&path))?;
+        if left_entry != right_entry {
+            changed.push(ChangedPath {
+                path,
+                left: left_entry,
+                right: right_entry,
+            });
+        }
+    }
+    Ok(changed)
 }
 
 fn collect_paths(root: &Path, dir: &Path, paths: &mut BTreeSet<PathBuf>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_dir() {
             collect_paths(root, &path, paths)?;
         } else if path
             .file_name()
@@ -974,6 +1442,7 @@ fn hunk_from_ops(path: &Path, right: &str, ops: &[DiffOp]) -> Option<Hunk> {
         .unwrap_or_default();
 
     Some(Hunk {
+        role: HunkRole::Content,
         old_start,
         old_end,
         new_start,
@@ -998,8 +1467,9 @@ fn range_summary(start: usize, end: usize) -> String {
     }
 }
 
-fn whole_file_hunk(summary: impl Into<String>) -> Hunk {
+fn whole_file_hunk(summary: impl Into<String>, role: HunkRole) -> Hunk {
     Hunk {
+        role,
         old_start: 0,
         old_end: 0,
         new_start: 0,
@@ -1011,10 +1481,22 @@ fn whole_file_hunk(summary: impl Into<String>) -> Hunk {
     }
 }
 
+fn executable_hunk(left: bool, right: bool) -> Hunk {
+    let left = if left { "+x" } else { "-x" };
+    let right = if right { "+x" } else { "-x" };
+    whole_file_hunk(
+        format!("executable bit changed: {left} -> {right}"),
+        HunkRole::Executable,
+    )
+}
+
 fn render_hunks(left: &[String], right: &[String], hunks: &[Hunk]) -> String {
     let mut output = Vec::new();
     let mut new_cursor = 0;
     for hunk in hunks {
+        if hunk.role != HunkRole::Content {
+            continue;
+        }
         output.extend_from_slice(&right[new_cursor..hunk.new_start]);
         if hunk.all_selected() {
             output.extend_from_slice(&right[hunk.new_start..hunk.new_end]);
@@ -1547,7 +2029,7 @@ mod tests {
         )
         .unwrap();
 
-        let app = DiffApp::open(left, right, output).unwrap();
+        let mut app = DiffApp::open(left, right, output).unwrap();
         let lines = app.lines();
 
         assert!(has_span(

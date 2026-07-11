@@ -6,8 +6,12 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+
+static TEMP_ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn tui_leaves_alternate_screen_on_exit() -> io::Result<()> {
@@ -45,6 +49,54 @@ fn edit_tty_scrolls_to_long_file_cursor() -> io::Result<()> {
         ":wq\r",
     )?;
 
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn edit_tty_scrolls_horizontally_by_terminal_cell_width() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let message = root.join("message.txt");
+    let log = root.join("tty.log");
+    fs::write(&message, format!("{}TAIL\n", "中".repeat(50)))?;
+
+    expect_alt_screen_after_keys(
+        &log,
+        jjc(),
+        &[s("edit"), path_arg(&message)],
+        "$",
+        "TAIL",
+        ":wq\r",
+    )?;
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn edit_tty_large_file_uses_plain_fallback_and_preserves_bytes() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let message = root.join("large.rs");
+    let log = root.join("tty.log");
+    let content = "fn large() {}\n".repeat(40_000);
+    fs::write(&message, &content)?;
+
+    expect_alt_screen_after_keys(
+        &log,
+        jjc(),
+        &[s("edit"), path_arg(&message)],
+        "G",
+        "PLAIN LARGE FILE",
+        ":wq\r",
+    )?;
+
+    assert_eq!(fs::read_to_string(&message)?, content);
     fs::remove_dir_all(root)?;
     Ok(())
 }
@@ -91,7 +143,42 @@ fn diff_tty_scrolls_inside_long_hunk() -> io::Result<()> {
             path_arg(&output),
         ],
         "\x1b[6~\x1b[6~\x1b[6~\x1b[6~",
-        "new-040",
+        "old-020",
+        "w",
+    )?;
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn diff_manual_edit_scrolls_horizontally_by_terminal_cell_width() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let left = root.join("left");
+    let right = root.join("right");
+    let output = root.join("output");
+    let log = root.join("tty.log");
+    fs::create_dir_all(&left)?;
+    fs::create_dir_all(&right)?;
+    fs::create_dir_all(&output)?;
+    fs::write(left.join("file.txt"), "old\n")?;
+    fs::write(right.join("file.txt"), format!("{}TAIL\n", "中".repeat(50)))?;
+
+    expect_alt_screen_after_keys_with_delayed_exit(
+        &log,
+        jjc(),
+        &[
+            s("diff"),
+            path_arg(&left),
+            path_arg(&right),
+            path_arg(&output),
+        ],
+        "e$",
+        "TAIL",
+        "\x1b",
         "w",
     )?;
 
@@ -131,6 +218,45 @@ fn merge_tty_scrolls_output_pane() -> io::Result<()> {
         ],
         "\x1b[6~\x1b[6~\x1b[6~\x1b[6~",
         "out-040",
+        ":wq\r",
+    )?;
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn merge_output_scrolls_horizontally_by_terminal_cell_width() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let left = root.join("left.txt");
+    let base = root.join("base.txt");
+    let right = root.join("right.txt");
+    let output = root.join("output.txt");
+    let log = root.join("tty.log");
+    fs::write(&left, "left\n")?;
+    fs::write(&base, "base\n")?;
+    fs::write(&right, "right\n")?;
+    fs::write(&output, format!("{}TAIL\n", "中".repeat(50)))?;
+
+    expect_alt_screen_after_keys(
+        &log,
+        jjc(),
+        &[
+            s("merge"),
+            path_arg(&left),
+            path_arg(&base),
+            path_arg(&right),
+            path_arg(&output),
+            s("--marker-length"),
+            s("7"),
+            s("--path"),
+            s("file.txt"),
+        ],
+        "$",
+        "TAIL",
         ":wq\r",
     )?;
 
@@ -355,13 +481,20 @@ fn jj_split_tty_undo_redo_preserves_selection_state() -> io::Result<()> {
 
 fn expect_cursor_style_switch(log: &Path, program: &str, args: &[String]) -> io::Result<()> {
     let script = format!(
-        "log_file -noappend {}\nset timeout 10\nspawn {} {}\nexpect \"\\033\\[?1049h\"\nexpect \"\\033\\[2 q\"\nsend -- i\nexpect \"\\033\\[6 q\"\nsend -- \"\\033\"\nexpect \"\\033\\[2 q\"\nsend -- :wq\\r\nexpect \"\\033\\[?1049l\"\nexpect eof\nset wait_result [wait]\nexit [lindex $wait_result 3]\n",
-        tcl_word(&path_arg(log)),
-        tcl_word(program),
-        args.iter()
+        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 24 columns 100}}\nspawn {program} {args}\n{enter}{block}send -- i\n{bar}send -- \"\\033\"\n{block_again}send -- :wq\\r\n{leave}{eof}set wait_result [wait]\nexit [lindex $wait_result 3]\n",
+        log = tcl_word(&path_arg(log)),
+        program = tcl_word(program),
+        args = args
+            .iter()
             .map(|arg| tcl_word(arg))
             .collect::<Vec<_>>()
             .join(" "),
+        enter = expect_exact_script("\x1b[?1049h"),
+        block = expect_exact_script("\x1b[2 q"),
+        bar = expect_exact_script("\x1b[6 q"),
+        block_again = expect_exact_script("\x1b[2 q"),
+        leave = expect_exact_script("\x1b[?1049l"),
+        eof = expect_eof_script(),
     );
     let output = Command::new("expect").arg("-c").arg(script).output()?;
     assert_success(output);
@@ -370,11 +503,19 @@ fn expect_cursor_style_switch(log: &Path, program: &str, args: &[String]) -> io:
 }
 
 fn expect_available() -> bool {
-    Command::new("expect").arg("-v").output().is_ok()
+    let available = Command::new("expect").arg("-v").output().is_ok();
+    if !available && std::env::var_os("JJC_REQUIRE_INTEGRATION").is_some() {
+        panic!("expect is required when JJC_REQUIRE_INTEGRATION is set");
+    }
+    available
 }
 
 fn jj_available() -> bool {
-    Command::new("jj").arg("--version").output().is_ok()
+    let available = Command::new("jj").arg("--version").output().is_ok();
+    if !available && std::env::var_os("JJC_REQUIRE_INTEGRATION").is_some() {
+        panic!("jj is required when JJC_REQUIRE_INTEGRATION is set");
+    }
+    available
 }
 
 fn jjc() -> &'static str {
@@ -486,6 +627,10 @@ fn jj_merge_args<const N: usize>(repo: &Path, tail: [&str; N]) -> Vec<String> {
         s(
             "merge-tools.jjc.merge-args=[\"merge\",\"$left\",\"$base\",\"$right\",\"$output\",\"--marker-length\",\"$marker_length\",\"--path\",\"$path\"]",
         ),
+        s("--config"),
+        s("merge-tools.jjc.merge-tool-edits-conflict-markers=true"),
+        s("--config"),
+        s("merge-tools.jjc.conflict-marker-style=\"git\""),
     ];
     args.extend(tail.into_iter().map(s));
     args
@@ -493,14 +638,18 @@ fn jj_merge_args<const N: usize>(repo: &Path, tail: [&str; N]) -> Vec<String> {
 
 fn expect_alt_screen(log: &Path, program: &str, args: &[String], keys: &str) -> io::Result<()> {
     let script = format!(
-        "log_file -noappend {}\nset timeout 10\nspawn {} {}\nexpect \"\\033\\[?1049h\"\nsend -- {}\nexpect \"\\033\\[?1049l\"\nexpect eof\nset wait_result [wait]\nexit [lindex $wait_result 3]\n",
-        tcl_word(&path_arg(log)),
-        tcl_word(program),
-        args.iter()
+        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 24 columns 100}}\nspawn {program} {args}\n{enter}send -- {keys}\n{leave}{eof}set wait_result [wait]\nexit [lindex $wait_result 3]\n",
+        log = tcl_word(&path_arg(log)),
+        program = tcl_word(program),
+        args = args
+            .iter()
             .map(|arg| tcl_word(arg))
             .collect::<Vec<_>>()
             .join(" "),
-        tcl_string(keys),
+        enter = expect_exact_script("\x1b[?1049h"),
+        keys = tcl_string(keys),
+        leave = expect_exact_script("\x1b[?1049l"),
+        eof = expect_eof_script(),
     );
     let output = Command::new("expect").arg("-c").arg(script).output()?;
     assert_success(output);
@@ -516,20 +665,58 @@ fn expect_alt_screen_after_keys(
     exit_keys: &str,
 ) -> io::Result<()> {
     let script = format!(
-        "log_file -noappend {}\nset timeout 10\nspawn {} {}\nexpect \"\\033\\[?1049h\"\nsend -- {}\nexpect {}\nsend -- {}\nexpect \"\\033\\[?1049l\"\nexpect eof\nset wait_result [wait]\nexit [lindex $wait_result 3]\n",
-        tcl_word(&path_arg(log)),
-        tcl_word(program),
-        args.iter()
+        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 24 columns 100}}\nspawn {program} {args}\n{enter}send -- {keys}\nafter 200\nsend -- {exit_keys}\n{leave}{eof}set wait_result [wait]\nexit [lindex $wait_result 3]\n",
+        log = tcl_word(&path_arg(log)),
+        program = tcl_word(program),
+        args = args
+            .iter()
             .map(|arg| tcl_word(arg))
             .collect::<Vec<_>>()
             .join(" "),
-        tcl_string(keys),
-        tcl_word(expected),
-        tcl_string(exit_keys),
+        enter = expect_exact_script("\x1b[?1049h"),
+        keys = tcl_string(keys),
+        exit_keys = tcl_string(exit_keys),
+        leave = expect_exact_script("\x1b[?1049l"),
+        eof = expect_eof_script(),
     );
     let output = Command::new("expect").arg("-c").arg(script).output()?;
     assert_success(output);
     assert_alt_screen_log(log)?;
+    assert_screen_log_contains(log, expected)?;
+    Ok(())
+}
+
+fn expect_alt_screen_after_keys_with_delayed_exit(
+    log: &Path,
+    program: &str,
+    args: &[String],
+    keys: &str,
+    expected: &str,
+    first_exit_keys: &str,
+    second_exit_keys: &str,
+) -> io::Result<()> {
+    let script = format!(
+        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 24 columns 100}}\nspawn {program} {args}\n{enter}send -- {keys}\n{expected}send -- {first_exit_keys}\n{select_redraw}send -- {second_exit_keys}\n{leave}{eof}set wait_result [wait]\nexit [lindex $wait_result 3]\n",
+        log = tcl_word(&path_arg(log)),
+        program = tcl_word(program),
+        args = args
+            .iter()
+            .map(|arg| tcl_word(arg))
+            .collect::<Vec<_>>()
+            .join(" "),
+        enter = expect_exact_script("\x1b[?1049h"),
+        keys = tcl_string(keys),
+        expected = expect_exact_script(expected),
+        first_exit_keys = tcl_string(first_exit_keys),
+        select_redraw = expect_exact_script("\x1b[?25l"),
+        second_exit_keys = tcl_string(second_exit_keys),
+        leave = expect_exact_script("\x1b[?1049l"),
+        eof = expect_eof_script(),
+    );
+    let output = Command::new("expect").arg("-c").arg(script).output()?;
+    assert_success(output);
+    assert_alt_screen_log(log)?;
+    assert_screen_log_contains(log, expected)?;
     Ok(())
 }
 
@@ -570,6 +757,172 @@ fn assert_alt_screen_log(log: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn assert_screen_log_contains(log: &Path, expected: &str) -> io::Result<()> {
+    let bytes = fs::read(log)?;
+    let mut screen = TestTerminal::new(24, 100);
+    let mut in_alternate_screen = false;
+    let mut matched = false;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'\x1b' && bytes.get(index + 1) == Some(&b'[') {
+            let mut end = index + 2;
+            while end < bytes.len() && !(0x40..=0x7e).contains(&bytes[end]) {
+                end += 1;
+            }
+            if end >= bytes.len() {
+                break;
+            }
+            let params = String::from_utf8_lossy(&bytes[index + 2..end]);
+            let command = bytes[end] as char;
+            if command == 'h' && params == "?1049" {
+                in_alternate_screen = true;
+                screen.clear();
+            } else if command == 'l' && params == "?1049" {
+                matched |= screen.contains(expected);
+                in_alternate_screen = false;
+            } else if in_alternate_screen {
+                screen.csi(&params, command);
+                matched |= screen.contains(expected);
+            }
+            index = end + 1;
+            continue;
+        }
+
+        if !in_alternate_screen {
+            index += 1;
+            continue;
+        }
+        match bytes[index] {
+            b'\r' => {
+                screen.column = 0;
+                index += 1;
+            }
+            b'\n' => {
+                screen.row = (screen.row + 1).min(screen.height.saturating_sub(1));
+                index += 1;
+            }
+            0x08 => {
+                screen.column = screen.column.saturating_sub(1);
+                index += 1;
+            }
+            byte if byte < 0x20 || byte == 0x7f => {
+                index += 1;
+            }
+            _ => {
+                let text = std::str::from_utf8(&bytes[index..]).map_err(io::Error::other)?;
+                let character = text.chars().next().expect("non-empty UTF-8 tail");
+                screen.put(character);
+                matched |= screen.contains(expected);
+                index += character.len_utf8();
+            }
+        }
+    }
+
+    assert!(
+        matched,
+        "terminal screen never contained {expected:?}; final screen:\n{}",
+        screen.render()
+    );
+    Ok(())
+}
+
+struct TestTerminal {
+    cells: Vec<Vec<char>>,
+    height: usize,
+    width: usize,
+    row: usize,
+    column: usize,
+}
+
+impl TestTerminal {
+    fn new(height: usize, width: usize) -> Self {
+        Self {
+            cells: vec![vec![' '; width]; height],
+            height,
+            width,
+            row: 0,
+            column: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.cells.fill(vec![' '; self.width]);
+        self.row = 0;
+        self.column = 0;
+    }
+
+    fn csi(&mut self, params: &str, command: char) {
+        let numbers = params
+            .trim_start_matches('?')
+            .split(';')
+            .map(|part| part.parse::<usize>().unwrap_or(0))
+            .collect::<Vec<_>>();
+        let first = numbers.first().copied().unwrap_or(0);
+        match command {
+            'H' | 'f' => {
+                self.row = first.saturating_sub(1).min(self.height.saturating_sub(1));
+                self.column = numbers
+                    .get(1)
+                    .copied()
+                    .unwrap_or(1)
+                    .saturating_sub(1)
+                    .min(self.width.saturating_sub(1));
+            }
+            'A' => self.row = self.row.saturating_sub(first.max(1)),
+            'B' => {
+                self.row = (self.row + first.max(1)).min(self.height.saturating_sub(1));
+            }
+            'C' => {
+                self.column = (self.column + first.max(1)).min(self.width.saturating_sub(1));
+            }
+            'D' => self.column = self.column.saturating_sub(first.max(1)),
+            'G' => {
+                self.column = first.saturating_sub(1).min(self.width.saturating_sub(1));
+            }
+            'd' => self.row = first.saturating_sub(1).min(self.height.saturating_sub(1)),
+            'J' if first == 2 || first == 3 => self.clear(),
+            'K' => match first {
+                1 => self.cells[self.row][..=self.column].fill(' '),
+                2 => self.cells[self.row].fill(' '),
+                _ => self.cells[self.row][self.column..].fill(' '),
+            },
+            _ => {}
+        }
+    }
+
+    fn put(&mut self, character: char) {
+        let width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        if width == 0 {
+            return;
+        }
+        if self.row >= self.height || self.column >= self.width {
+            return;
+        }
+        self.cells[self.row][self.column] = character;
+        for continuation in 1..width {
+            if self.column + continuation < self.width {
+                self.cells[self.row][self.column + continuation] = ' ';
+            }
+        }
+        self.column = (self.column + width).min(self.width.saturating_sub(1));
+    }
+
+    fn contains(&self, expected: &str) -> bool {
+        self.cells
+            .iter()
+            .any(|row| row.iter().collect::<String>().contains(expected))
+    }
+
+    fn render(&self) -> String {
+        self.cells
+            .iter()
+            .map(|row| row.iter().collect::<String>().trim_end().to_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 fn path_arg(path: &Path) -> String {
     path.display().to_string()
 }
@@ -590,8 +943,20 @@ fn tcl_string(value: &str) -> String {
             .replace('"', "\\\"")
             .replace('[', "\\[")
             .replace(']', "\\]")
+            .replace('$', "\\$")
             .replace('\r', "\\r")
     )
+}
+
+fn expect_exact_script(value: &str) -> String {
+    format!(
+        "expect {{\n-exact {} {{}}\ntimeout {{catch {{close}}; catch {{wait}}; exit 124}}\neof {{catch {{wait}}; exit 125}}\n}}\n",
+        tcl_word(value)
+    )
+}
+
+fn expect_eof_script() -> &'static str {
+    "expect {\neof {}\ntimeout {catch {close}; catch {wait}; exit 124}\n}\n"
 }
 
 fn toml_string(value: &str) -> String {
@@ -644,12 +1009,13 @@ fn numbered_lines(prefix: &str, count: usize) -> String {
 
 fn temp_root() -> io::Result<PathBuf> {
     let root = std::env::temp_dir().join(format!(
-        "jjc-tty-test-{}-{}",
+        "jjc-tty-test-{}-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        TEMP_ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
     ));
     fs::create_dir_all(&root)?;
     Ok(root)
