@@ -11,4 +11,5 @@ pub mod render;
 pub mod scroll;
 pub mod syntax;
 pub mod theme;
+pub mod ui;
 pub mod vim;

@@ -244,7 +244,7 @@ fn jj_split_can_select_one_changed_line_with_jjc() -> io::Result<()> {
     fs::write(repo.join("file.txt"), "a\nnew1\nc\nnew2\ne\n")?;
 
     let output = jj(&repo)
-        .env("JJC_KEYS", "nxw")
+        .env("JJC_KEYS", "Ow")
         .args(diff_editor_config())
         .args(["split", "--tool", "jjc", "-m", "selected"])
         .output()?;
@@ -256,7 +256,7 @@ fn jj_split_can_select_one_changed_line_with_jjc() -> io::Result<()> {
     assert_success_ref(&output);
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "a\nold1\nc\nnew2\ne\n"
+        "a\nnew1\nc\nold2\ne\n"
     );
     Ok(())
 }
@@ -313,7 +313,7 @@ fn jj_split_can_select_added_file_with_jjc() -> io::Result<()> {
 }
 
 #[test]
-fn jj_split_can_unselect_current_file_with_jjc() -> io::Result<()> {
+fn jj_split_can_keep_only_the_current_hunk_with_jjc() -> io::Result<()> {
     if !jj_available() {
         return Ok(());
     }
@@ -326,7 +326,7 @@ fn jj_split_can_unselect_current_file_with_jjc() -> io::Result<()> {
     fs::write(repo.join("b.txt"), "new-b\n")?;
 
     let output = jj(&repo)
-        .env("JJC_KEYS", "]Dw")
+        .env("JJC_KEYS", "ow")
         .args(diff_editor_config())
         .args(["split", "--tool", "jjc", "-m", "selected"])
         .output()?;
@@ -462,6 +462,7 @@ fn jj_resolve_q_cancels_merge_editor() -> io::Result<()> {
     let output = jj(&repo).args(["resolve", "--list"]).output()?;
     assert_success_ref(&output);
     assert!(String::from_utf8_lossy(&output.stdout).contains("file.txt"));
+    assert!(!fs::read(repo.join("file.txt"))?.is_empty());
     Ok(())
 }
 
@@ -522,16 +523,16 @@ fn jj_resolve_delete_modify_delete_side_stays_protocol_limited() -> io::Result<(
     let repo = delete_modify_repo("delete-modify-delete")?;
 
     let output = jj(&repo)
-        .env("JJC_KEYS", "1:wq<Enter>")
+        .env("JJC_KEYS", "1:wq<Enter><Esc>q")
         .args(merge_editor_config())
         .args(["resolve", "--tool", "jjc", "file.txt"])
         .output()?;
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("empty"));
 
     let output = jj(&repo).args(["resolve", "--list"]).output()?;
     assert_success_ref(&output);
     assert!(String::from_utf8_lossy(&output.stdout).contains("file.txt"));
+    assert!(!fs::read(repo.join("file.txt"))?.is_empty());
     Ok(())
 }
 

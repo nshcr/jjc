@@ -7,6 +7,7 @@ use crossterm::event;
 use crossterm::event::Event;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
+use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
 
 static SCRIPT: OnceLock<Mutex<Option<VecDeque<KeyEvent>>>> = OnceLock::new();
@@ -15,7 +16,13 @@ pub fn scripted() -> bool {
     std::env::var_os("JJC_KEYS").is_some()
 }
 
-pub fn read_key() -> io::Result<KeyEvent> {
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum AppEvent {
+    Key(KeyEvent),
+    Resize,
+}
+
+pub fn read_event() -> io::Result<AppEvent> {
     if scripted() {
         let script = SCRIPT.get_or_init(|| Mutex::new(parse_env_script()));
         let mut script = script.lock().unwrap();
@@ -25,14 +32,18 @@ pub fn read_key() -> io::Result<KeyEvent> {
                 "JJC_KEYS is not valid",
             ));
         };
-        return events.pop_front().ok_or_else(|| {
+        return events.pop_front().map(AppEvent::Key).ok_or_else(|| {
             io::Error::new(io::ErrorKind::UnexpectedEof, "JJC_KEYS ran out of input")
         });
     }
 
     loop {
-        if let Event::Key(key) = event::read()? {
-            return Ok(key);
+        match event::read()? {
+            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                return Ok(AppEvent::Key(key));
+            }
+            Event::Resize(_, _) => return Ok(AppEvent::Resize),
+            _ => {}
         }
     }
 }
@@ -74,8 +85,11 @@ fn key_token(token: &str) -> Result<KeyEvent, String> {
         "Down" => Ok(key(KeyCode::Down)),
         "PageUp" => Ok(key(KeyCode::PageUp)),
         "PageDown" => Ok(key(KeyCode::PageDown)),
+        "F1" => Ok(key(KeyCode::F(1))),
         "C-r" => Ok(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
         "C-h" => Ok(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL)),
+        "C-s" => Ok(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+        "C-c" => Ok(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         "C-w" => Ok(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)),
         "C-u" => Ok(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
         _ => Err(format!("unknown key token: {token}")),
@@ -92,7 +106,7 @@ mod tests {
 
     #[test]
     fn parses_named_keys() {
-        let keys = parse_script("iHi<Esc>:wq<Enter><C-r><PageDown><PageUp>").unwrap();
-        assert_eq!(keys.len(), 11);
+        let keys = parse_script("iHi<Esc>:wq<Enter><C-r><C-s><C-c><F1><PageDown><PageUp>").unwrap();
+        assert_eq!(keys.len(), 14);
     }
 }

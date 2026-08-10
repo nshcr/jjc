@@ -21,6 +21,16 @@ impl ViewScroll {
         self.horizontal_offset = offset;
     }
 
+    pub fn pan_horizontal(&mut self, delta: isize) {
+        self.horizontal_offset = self.horizontal_offset.saturating_add_signed(delta);
+    }
+
+    pub fn clamp_horizontal(&mut self, content_width: usize, viewport_width: usize) {
+        self.horizontal_offset = self
+            .horizontal_offset
+            .min(content_width.saturating_sub(viewport_width.max(1)));
+    }
+
     pub fn keep_visible(&mut self, cursor: usize, content_len: usize, viewport_len: usize) {
         let viewport_len = viewport_len.max(1);
         let cursor = cursor.min(content_len.saturating_sub(1));
@@ -120,5 +130,19 @@ mod tests {
         assert_eq!(normal_scroll.horizontal_offset(), 0);
         assert_eq!(normal_scroll.visible_column(4, 5), 4);
         assert_eq!(terminal_offset(usize::MAX), u16::MAX);
+    }
+
+    #[test]
+    fn pans_and_clamps_horizontal_selection_view() {
+        let mut scroll = ViewScroll::default();
+
+        scroll.pan_horizontal(16);
+        scroll.clamp_horizontal(20, 10);
+        assert_eq!(scroll.horizontal_offset(), 10);
+
+        scroll.pan_horizontal(-4);
+        assert_eq!(scroll.horizontal_offset(), 6);
+        scroll.pan_horizontal(-99);
+        assert_eq!(scroll.horizontal_offset(), 0);
     }
 }

@@ -7,16 +7,19 @@ use std::path::PathBuf;
 use std::str;
 
 use crossterm::event::KeyCode;
+use crossterm::event::KeyModifiers;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
+use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Block;
+use ratatui::widgets::BorderType;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Scrollbar;
 use ratatui::widgets::ScrollbarOrientation;
@@ -38,6 +41,7 @@ use crate::scroll::ViewScroll;
 use crate::scroll::scrollbar_area;
 use crate::scroll::terminal_offset;
 use crate::syntax;
+use crate::ui;
 use crate::vim::Vim;
 use crate::vim::VimMode;
 
@@ -50,8 +54,10 @@ pub struct DiffApp {
     scroll: ViewScroll,
     mode: Mode,
     edit_vim: Vim,
+    edit_baseline: Option<String>,
     undo: Vec<SelectionSnapshot>,
     redo: Vec<SelectionSnapshot>,
+    show_help: bool,
     config: AppConfig,
 }
 
@@ -149,8 +155,14 @@ enum DiffRowKind {
     Insert { new_index: usize },
 }
 
-#[derive(Clone, Eq, PartialEq)]
-struct SelectionSnapshot(Vec<Vec<Vec<bool>>>);
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SelectionSnapshot(Vec<FileSelectionSnapshot>);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileSelectionSnapshot {
+    hunks: Vec<Vec<bool>>,
+    manual_output: Option<String>,
+}
 
 impl DiffApp {
     pub fn open(left: PathBuf, right: PathBuf, output: PathBuf) -> io::Result<Self> {
@@ -170,17 +182,23 @@ impl DiffApp {
             files.push(file);
         }
 
+        let line_cursor = entries
+            .first()
+            .and_then(|entry| files[entry.file].hunks[entry.hunk].first_changed_row())
+            .unwrap_or(0);
         Ok(Self {
             output,
             files,
             entries,
             cursor: 0,
-            line_cursor: 0,
+            line_cursor,
             scroll: ViewScroll::default(),
             mode: Mode::Select,
             edit_vim: Vim::new(),
+            edit_baseline: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            show_help: false,
             config: AppConfig::load()?,
         })
     }
@@ -198,6 +216,7 @@ impl DiffApp {
                 let line_count = self.line_count();
                 self.scroll
                     .keep_visible(self.cursor_line_index(), line_count, height);
+                let lines = self.lines();
                 let cursor_column = if self.mode == Mode::Edit {
                     self.current_edit_buffer()
                         .map(|buffer| {
@@ -219,29 +238,37 @@ impl DiffApp {
                         })
                         .unwrap_or(0)
                 } else {
-                    0
+                    lines.iter().map(Line::width).max().unwrap_or(0)
                 };
-                self.scroll
-                    .keep_column_visible(cursor_column, content_width, width);
-                let safe_horizontal_offset = self.current_edit_buffer().map(|buffer| {
-                    display_boundary_at_or_after(
-                        buffer.current_line(),
-                        self.scroll.horizontal_offset(),
-                        TAB_WIDTH,
-                    )
-                });
-                if let Some(offset) = safe_horizontal_offset {
-                    self.scroll.set_horizontal_offset(offset);
+                if self.mode == Mode::Edit {
+                    self.scroll
+                        .keep_column_visible(cursor_column, content_width, width);
+                    let safe_horizontal_offset = self.current_edit_buffer().map(|buffer| {
+                        display_boundary_at_or_after(
+                            buffer.current_line(),
+                            self.scroll.horizontal_offset(),
+                            TAB_WIDTH,
+                        )
+                    });
+                    if let Some(offset) = safe_horizontal_offset {
+                        self.scroll.set_horizontal_offset(offset);
+                    }
+                } else {
+                    self.scroll.clamp_horizontal(content_width, width);
                 }
                 let mut scrollbar_state = self.scroll.scrollbar_state(line_count, height);
-                let lines = self.lines();
                 frame.render_widget(
                     Paragraph::new(lines)
                         .scroll((
                             terminal_offset(self.scroll.offset()),
                             terminal_offset(self.scroll.horizontal_offset()),
                         ))
-                        .block(Block::bordered().title("jjc diff")),
+                        .block(
+                            Block::bordered()
+                                .border_type(BorderType::Rounded)
+                                .border_style(Style::new().fg(Color::DarkGray))
+                                .title(format!(" jjc diff · {} files ", self.files.len())),
+                        ),
                     rows[0],
                 );
                 frame.render_stateful_widget(
@@ -250,7 +277,9 @@ impl DiffApp {
                     &mut scrollbar_state,
                 );
                 frame.render_widget(Paragraph::new(self.status()), rows[1]);
-                if self.mode == Mode::Edit && self.current_edit_buffer().is_some() {
+                if self.show_help {
+                    ui::render_help(frame, "jjc diff help", DIFF_HELP);
+                } else if self.mode == Mode::Edit && self.current_edit_buffer().is_some() {
                     let x = rows[0].x + 1 + self.scroll.visible_column(cursor_column, width) as u16;
                     let y = rows[0].y
                         + 1
@@ -259,21 +288,47 @@ impl DiffApp {
                 }
             })?;
 
-            if self.handle_key(input::read_key()?)? {
-                return Ok(());
+            match input::read_event()? {
+                input::AppEvent::Key(key) if self.handle_key(key)? => return Ok(()),
+                input::AppEvent::Key(_) | input::AppEvent::Resize => {}
             }
         }
     }
 
     pub fn run_scripted(&mut self) -> io::Result<()> {
         loop {
-            if self.handle_key(input::read_key()?)? {
-                return Ok(());
+            match input::read_event()? {
+                input::AppEvent::Key(key) if self.handle_key(key)? => return Ok(()),
+                input::AppEvent::Key(_) | input::AppEvent::Resize => {}
             }
         }
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> io::Result<bool> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('s') => {
+                    self.write_output()?;
+                    return Ok(true);
+                }
+                KeyCode::Char('c') => {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "diff canceled"));
+                }
+                _ => {}
+            }
+        }
+        if self.show_help {
+            if matches!(key.code, KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?')) {
+                self.show_help = false;
+            }
+            return Ok(false);
+        }
+        if key.code == KeyCode::F(1)
+            || (self.cursor_mode() == VimMode::Normal && key.code == KeyCode::Char('?'))
+        {
+            self.show_help = true;
+            return Ok(false);
+        }
         if self.mode == Mode::Edit {
             self.handle_edit_key(key);
             return Ok(false);
@@ -288,10 +343,17 @@ impl DiffApp {
             KeyCode::Char('p') => self.move_line_up(),
             KeyCode::PageDown => self.move_line_by(10),
             KeyCode::PageUp => self.move_line_by(-10),
+            KeyCode::Char('h') | KeyCode::Left => self.scroll.pan_horizontal(-8),
+            KeyCode::Char('l') | KeyCode::Right => self.scroll.pan_horizontal(8),
             KeyCode::Char(' ') => self.toggle_current(),
+            KeyCode::Enter => self.toggle_current_and_advance(),
             KeyCode::Char('x') => self.toggle_current_line(),
             KeyCode::Char('S') => self.select_current_file(true),
             KeyCode::Char('D') => self.select_current_file(false),
+            KeyCode::Char('s') => self.select_all(true),
+            KeyCode::Char('d') => self.select_all(false),
+            KeyCode::Char('o') => self.select_only_current_hunk(),
+            KeyCode::Char('O') => self.select_only_current_line(),
             KeyCode::Char('f') => self.toggle_current_function(),
             KeyCode::Char('e') => self.enter_edit_mode(),
             KeyCode::Char('u') => self.undo(),
@@ -310,15 +372,15 @@ impl DiffApp {
 
     fn handle_edit_key(&mut self, key: crossterm::event::KeyEvent) {
         if self.edit_vim.mode() == VimMode::Normal && key.code == KeyCode::Esc {
-            self.mode = Mode::Select;
+            self.leave_edit_mode();
             return;
         }
         let Some(entry) = self.entries.get(self.cursor) else {
-            self.mode = Mode::Select;
+            self.leave_edit_mode();
             return;
         };
         let Some(buffer) = self.files[entry.file].manual_output.as_mut() else {
-            self.mode = Mode::Select;
+            self.leave_edit_mode();
             return;
         };
         self.edit_vim.handle_key(buffer, key);
@@ -370,22 +432,31 @@ impl DiffApp {
                 file.right_cache
                     .lines(&file.path, &right_display_lines, &self.config);
             for (hunk_index, hunk) in file.hunks.iter().enumerate() {
-                let marker = if hunk.selected { "[x]" } else { "[ ]" };
-                let prefix = if self
-                    .entries
-                    .get(self.cursor)
-                    .is_some_and(|entry| entry.file == file_index && entry.hunk == hunk_index)
-                {
-                    ">"
+                let (marker, marker_style) = if hunk.all_selected() {
+                    ("[x]", Style::new().fg(Color::Green))
+                } else if hunk.any_selected() {
+                    ("[~]", Style::new().fg(Color::Yellow))
                 } else {
-                    " "
+                    ("[ ]", Style::new().fg(Color::DarkGray))
                 };
-                lines.push(Line::from(format!("{prefix} {marker} {}", hunk.summary)));
-                if self
+                let active = self
                     .entries
                     .get(self.cursor)
-                    .is_some_and(|entry| entry.file == file_index && entry.hunk == hunk_index)
-                {
+                    .is_some_and(|entry| entry.file == file_index && entry.hunk == hunk_index);
+                let summary_style = if active {
+                    Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        if active { "> " } else { "  " },
+                        Style::new().fg(Color::Cyan),
+                    ),
+                    Span::styled(marker, marker_style),
+                    Span::styled(format!(" {}", hunk.summary), summary_style),
+                ]));
+                if active {
                     for (line_index, row) in hunk.rows.iter().enumerate() {
                         let cursor = if line_index == self.line_cursor {
                             ">"
@@ -424,22 +495,54 @@ impl DiffApp {
         lines
     }
 
-    fn status(&self) -> String {
+    fn status(&self) -> Line<'static> {
         match self.mode {
             Mode::Select => {
-                "j/k hunk  [/ ] file  n/p/PgUp/PgDn line  space/x toggle  S/D file  f function  e edit output  u/r undo redo  w write  q cancel".to_owned()
+                let (full, partial, total) = self.selection_progress();
+                let position = if self.entries.is_empty() {
+                    format!("no selectable hunks | {full} selected")
+                } else {
+                    format!(
+                        "hunk {}/{} | {} full + {} partial / {}",
+                        self.cursor + 1,
+                        self.entries.len(),
+                        full,
+                        partial,
+                        total
+                    )
+                };
+                let pan = self.scroll.horizontal_offset();
+                ui::status_line(
+                    "SELECT",
+                    if pan > 0 {
+                        format!("{position} | column +{pan}")
+                    } else {
+                        position
+                    },
+                    "Space toggle  o only  s/d all  Ctrl-S write  ? help",
+                )
             }
             Mode::Edit
                 if self
                     .current_edit_buffer()
                     .is_some_and(|buffer| is_large_content(buffer.lines())) =>
             {
-                "EDIT OUTPUT  PLAIN LARGE FILE  syntax disabled  Esc select".to_owned()
+                ui::status_line(
+                    "EDIT",
+                    "plain large file; syntax disabled",
+                    "Esc select  Ctrl-S write  Ctrl-C cancel  F1 help",
+                )
             }
-            Mode::Edit if self.edit_vim.mode() == VimMode::Normal => {
-                "EDIT OUTPUT NORMAL  i/a/o insert  h/j/k/l/w/b/e move  x/dd delete  Esc select".to_owned()
-            }
-            Mode::Edit => "EDIT OUTPUT INSERT  Esc normal".to_owned(),
+            Mode::Edit if self.edit_vim.mode() == VimMode::Normal => ui::status_line(
+                "EDIT NORMAL",
+                self.current_file_label(),
+                "i insert  Esc select  Ctrl-S write  Ctrl-C cancel  ? help",
+            ),
+            Mode::Edit => ui::status_line(
+                "EDIT INSERT",
+                self.current_file_label(),
+                "Esc normal  Ctrl-S write  Ctrl-C cancel  F1 help",
+            ),
         }
     }
 
@@ -453,13 +556,13 @@ impl DiffApp {
     fn move_down(&mut self) {
         if !self.entries.is_empty() {
             self.cursor = (self.cursor + 1).min(self.entries.len() - 1);
-            self.line_cursor = 0;
+            self.reset_line_cursor();
         }
     }
 
     fn move_up(&mut self) {
         self.cursor = self.cursor.saturating_sub(1);
-        self.line_cursor = 0;
+        self.reset_line_cursor();
     }
 
     fn move_next_file(&mut self) {
@@ -484,27 +587,33 @@ impl DiffApp {
             .find(|(_, entry)| entry.file == target_file)
         {
             self.cursor = index;
-            self.line_cursor = 0;
+            self.reset_line_cursor();
         }
     }
 
     fn move_line_down(&mut self) {
         if let Some(hunk) = self.current_hunk() {
-            self.line_cursor = (self.line_cursor + 1).min(hunk.rows.len().saturating_sub(1));
+            self.line_cursor = hunk.move_changed_row(self.line_cursor, 1);
         }
     }
 
     fn move_line_up(&mut self) {
-        self.line_cursor = self.line_cursor.saturating_sub(1);
+        if let Some(hunk) = self.current_hunk() {
+            self.line_cursor = hunk.move_changed_row(self.line_cursor, -1);
+        }
     }
 
     fn move_line_by(&mut self, delta: isize) {
         if let Some(hunk) = self.current_hunk() {
-            self.line_cursor = self
-                .line_cursor
-                .saturating_add_signed(delta)
-                .min(hunk.rows.len().saturating_sub(1));
+            self.line_cursor = hunk.move_changed_row(self.line_cursor, delta);
         }
+    }
+
+    fn reset_line_cursor(&mut self) {
+        self.line_cursor = self
+            .current_hunk()
+            .and_then(Hunk::first_changed_row)
+            .unwrap_or(0);
     }
 
     fn toggle_current(&mut self) {
@@ -515,6 +624,11 @@ impl DiffApp {
             let hunk = &mut file.hunks[entry.hunk];
             hunk.set_selected(!hunk.selected);
         }
+    }
+
+    fn toggle_current_and_advance(&mut self) {
+        self.toggle_current();
+        self.move_down();
     }
 
     fn toggle_current_line(&mut self) {
@@ -558,6 +672,48 @@ impl DiffApp {
         }
     }
 
+    fn select_all(&mut self, selected: bool) {
+        if self.entries.is_empty() {
+            return;
+        }
+        self.push_undo();
+        self.set_all_selected(selected);
+    }
+
+    fn select_only_current_hunk(&mut self) {
+        let Some(entry) = self.entries.get(self.cursor).copied() else {
+            return;
+        };
+        self.push_undo();
+        self.set_all_selected(false);
+        self.files[entry.file].hunks[entry.hunk].set_selected(true);
+    }
+
+    fn select_only_current_line(&mut self) {
+        let Some(entry) = self.entries.get(self.cursor).copied() else {
+            return;
+        };
+        let Some(group) = self.files[entry.file].hunks[entry.hunk]
+            .rows
+            .get(self.line_cursor)
+            .and_then(|row| row.group)
+        else {
+            return;
+        };
+        self.push_undo();
+        self.set_all_selected(false);
+        self.files[entry.file].hunks[entry.hunk].set_group_selected(group, true);
+    }
+
+    fn set_all_selected(&mut self, selected: bool) {
+        for file in &mut self.files {
+            file.manual_output = None;
+            for hunk in &mut file.hunks {
+                hunk.set_selected(selected);
+            }
+        }
+    }
+
     fn enter_edit_mode(&mut self) {
         let Some(entry) = self.entries.get(self.cursor).copied() else {
             return;
@@ -569,8 +725,23 @@ impl DiffApp {
         if file.manual_output.is_none() {
             file.manual_output = Some(TextBuffer::from_text(&file.render_selection()));
         }
+        self.edit_baseline = file.manual_output.as_ref().map(TextBuffer::to_text);
         self.edit_vim.set_normal();
         self.mode = Mode::Edit;
+    }
+
+    fn leave_edit_mode(&mut self) {
+        let changed = self.edit_baseline.take().is_some_and(|baseline| {
+            self.current_edit_buffer()
+                .is_none_or(|buffer| buffer.to_text() != baseline)
+        });
+        if changed {
+            // Selection snapshots may predate the manual edit. Do not let an
+            // outer undo/redo silently replace newer hand-edited output.
+            self.undo.clear();
+            self.redo.clear();
+        }
+        self.mode = Mode::Select;
     }
 
     fn push_undo(&mut self) {
@@ -598,11 +769,9 @@ impl DiffApp {
         SelectionSnapshot(
             self.files
                 .iter()
-                .map(|file| {
-                    file.hunks
-                        .iter()
-                        .map(Hunk::selected_lines)
-                        .collect::<Vec<_>>()
+                .map(|file| FileSelectionSnapshot {
+                    hunks: file.hunks.iter().map(Hunk::selected_lines).collect(),
+                    manual_output: file.manual_output.as_ref().map(TextBuffer::to_text),
                 })
                 .collect(),
         )
@@ -610,9 +779,12 @@ impl DiffApp {
 
     fn restore(&mut self, snapshot: SelectionSnapshot) {
         for (file, file_snapshot) in self.files.iter_mut().zip(snapshot.0) {
-            for (hunk, hunk_snapshot) in file.hunks.iter_mut().zip(file_snapshot) {
+            for (hunk, hunk_snapshot) in file.hunks.iter_mut().zip(file_snapshot.hunks) {
                 hunk.restore_selected_lines(&hunk_snapshot);
             }
+            file.manual_output = file_snapshot
+                .manual_output
+                .map(|text| TextBuffer::from_text(&text));
         }
     }
 
@@ -623,6 +795,28 @@ impl DiffApp {
 
     fn current_file_index(&self) -> Option<usize> {
         self.entries.get(self.cursor).map(|entry| entry.file)
+    }
+
+    fn current_file_label(&self) -> String {
+        self.current_file_index()
+            .and_then(|index| self.files.get(index))
+            .map(|file| file.path.display().to_string())
+            .unwrap_or_else(|| "no editable file".to_owned())
+    }
+
+    fn selection_progress(&self) -> (usize, usize, usize) {
+        let mut full = 0;
+        let mut partial = 0;
+        let mut total = 0;
+        for hunk in self.files.iter().flat_map(|file| &file.hunks) {
+            total += 1;
+            if hunk.all_selected() {
+                full += 1;
+            } else if hunk.any_selected() {
+                partial += 1;
+            }
+        }
+        (full, partial, total)
     }
 
     fn cursor_line_index(&self) -> usize {
@@ -730,6 +924,28 @@ impl DiffApp {
         Ok(())
     }
 }
+
+const DIFF_HELP: &str = "Navigate
+  j/k, Up/Down        previous or next hunk
+  [/ ]                previous or next file
+  n/p, PgUp/PgDn      previous or next changed line
+  h/l, Left/Right     pan long lines horizontally
+
+Select
+  Space               toggle current hunk
+  Enter               toggle hunk and advance
+  x                   toggle current changed line
+  s/d                 select or deselect everything
+  S/D                 select or deselect current file
+  o/O                 keep only current hunk / changed line
+  f                   toggle current function
+  u/r                 undo or redo selection
+  e                   manually edit current file output
+
+Finish
+  Ctrl-S or w         write selection and exit
+  Ctrl-C or q         cancel without writing
+  ? or F1             toggle this help";
 
 impl DiffFile {
     fn load(path: PathBuf, left_entry: TreeEntry, right_entry: TreeEntry) -> io::Result<Self> {
@@ -1039,8 +1255,17 @@ impl DiffFile {
             return "[unsupported]".to_owned();
         }
         let total = self.hunks.len();
-        let selected = self.hunks.iter().filter(|hunk| hunk.selected).count();
-        format!("[{selected}/{total} hunks selected]")
+        let full = self.hunks.iter().filter(|hunk| hunk.all_selected()).count();
+        let partial = self
+            .hunks
+            .iter()
+            .filter(|hunk| hunk.any_selected() && !hunk.all_selected())
+            .count();
+        if partial == 0 {
+            format!("[{full}/{total} hunks selected]")
+        } else {
+            format!("[{full} full, {partial} partial / {total}]")
+        }
     }
 }
 
@@ -1535,6 +1760,32 @@ impl DiffRowKind {
 }
 
 impl Hunk {
+    fn first_changed_row(&self) -> Option<usize> {
+        self.rows.iter().position(|row| row.group.is_some())
+    }
+
+    fn move_changed_row(&self, current: usize, delta: isize) -> usize {
+        let mut anchors = Vec::new();
+        let mut last_group = None;
+        for (index, row) in self.rows.iter().enumerate() {
+            let Some(group) = row.group else {
+                continue;
+            };
+            if last_group != Some(group) {
+                anchors.push(index);
+                last_group = Some(group);
+            }
+        }
+        if anchors.is_empty() {
+            return 0;
+        }
+        let position = anchors
+            .iter()
+            .rposition(|anchor| *anchor <= current)
+            .unwrap_or(0);
+        anchors[position.saturating_add_signed(delta).min(anchors.len() - 1)]
+    }
+
     fn set_selected(&mut self, selected: bool) {
         self.selected = selected;
         for row in &mut self.rows {
@@ -1549,6 +1800,15 @@ impl Hunk {
             return;
         };
         let selected = !self.rows[index].selected;
+        for row in &mut self.rows {
+            if row.group == Some(group) {
+                row.selected = selected;
+            }
+        }
+        self.selected = self.any_selected();
+    }
+
+    fn set_group_selected(&mut self, group: usize, selected: bool) {
         for row in &mut self.rows {
             if row.group == Some(group) {
                 row.selected = selected;
@@ -2132,6 +2392,190 @@ mod tests {
         app.redo();
         assert_eq!(app.files[0].render(), Some(b"a\nold\nc\n".to_vec()));
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn global_and_only_current_selection_are_single_undoable_actions() {
+        let root = std::env::temp_dir().join(format!(
+            "jjc-diff-global-select-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let left = root.join("left");
+        let right = root.join("right");
+        let output = root.join("output");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::create_dir_all(&output).unwrap();
+        fs::write(left.join("a.txt"), "old-a\n").unwrap();
+        fs::write(right.join("a.txt"), "new-a\n").unwrap();
+        fs::write(left.join("b.txt"), "old-b\n").unwrap();
+        fs::write(right.join("b.txt"), "new-b\n").unwrap();
+
+        let mut app = DiffApp::open(left, right, output).unwrap();
+        app.select_all(false);
+        assert!(
+            app.files
+                .iter()
+                .flat_map(|file| &file.hunks)
+                .all(|hunk| !hunk.selected)
+        );
+        app.undo();
+        assert!(
+            app.files
+                .iter()
+                .flat_map(|file| &file.hunks)
+                .all(Hunk::all_selected)
+        );
+
+        app.files[1].manual_output = Some(TextBuffer::from_text("manual-b\n"));
+        app.select_only_current_hunk();
+        assert!(app.files[0].hunks[0].all_selected());
+        assert!(!app.files[1].hunks[0].any_selected());
+        assert!(app.files[1].manual_output.is_none());
+        app.undo();
+        assert!(app.files[1].hunks[0].all_selected());
+        assert_eq!(
+            app.files[1]
+                .manual_output
+                .as_ref()
+                .map(TextBuffer::to_text)
+                .as_deref(),
+            Some("manual-b\n")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manual_edits_invalidate_stale_selection_undo_and_redo() {
+        let root = std::env::temp_dir().join(format!(
+            "jjc-diff-manual-history-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let left = root.join("left");
+        let right = root.join("right");
+        let undo_output = root.join("undo-output");
+        let redo_output = root.join("redo-output");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::create_dir_all(&undo_output).unwrap();
+        fs::create_dir_all(&redo_output).unwrap();
+        fs::write(left.join("file.txt"), "old\n").unwrap();
+        fs::write(right.join("file.txt"), "new\n").unwrap();
+
+        let mut undo_app = DiffApp::open(left.clone(), right.clone(), undo_output.clone()).unwrap();
+        press_diff_key(&mut undo_app, 'd');
+        press_diff_key(&mut undo_app, 'e');
+        edit_current_output(&mut undo_app, 'X');
+        press_diff_key(&mut undo_app, 'u');
+        assert!(press_diff_key(&mut undo_app, 'w'));
+        assert_eq!(
+            fs::read_to_string(undo_output.join("file.txt")).unwrap(),
+            "Xold\n"
+        );
+
+        let mut redo_app = DiffApp::open(left, right, redo_output.clone()).unwrap();
+        press_diff_key(&mut redo_app, 'd');
+        press_diff_key(&mut redo_app, 'u');
+        press_diff_key(&mut redo_app, 'e');
+        edit_current_output(&mut redo_app, 'Y');
+        press_diff_key(&mut redo_app, 'r');
+        assert!(press_diff_key(&mut redo_app, 'w'));
+        assert_eq!(
+            fs::read_to_string(redo_output.join("file.txt")).unwrap(),
+            "Ynew\n"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn changed_line_navigation_skips_context_and_replacement_pairs() {
+        let left = "before\nold one\nmiddle\nold two\nafter\n";
+        let right = "before\nnew one\nmiddle\nnew two\nafter\n";
+        let hunks = hunks(Path::new("file.txt"), left, right);
+        assert_eq!(hunks.len(), 1);
+        let hunk = &hunks[0];
+        let first = hunk.first_changed_row().unwrap();
+        let second = hunk.move_changed_row(first, 1);
+
+        assert_ne!(first, second);
+        assert_ne!(hunk.rows[first].group, hunk.rows[second].group);
+        assert_eq!(hunk.move_changed_row(second, -1), first);
+        assert!(hunk.rows[first].kind.changed());
+        assert!(hunk.rows[second].kind.changed());
+    }
+
+    fn edit_current_output(app: &mut DiffApp, inserted: char) {
+        press_diff_key(app, 'i');
+        press_diff_key(app, inserted);
+        app.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))
+        .unwrap();
+        app.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))
+        .unwrap();
+    }
+
+    fn press_diff_key(app: &mut DiffApp, character: char) -> bool {
+        app.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char(character),
+            KeyModifiers::NONE,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn help_and_horizontal_pan_are_available_without_changing_selection() {
+        let root = std::env::temp_dir().join(format!(
+            "jjc-diff-help-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let left = root.join("left");
+        let right = root.join("right");
+        let output = root.join("output");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::create_dir_all(&output).unwrap();
+        fs::write(left.join("file.txt"), "old\n").unwrap();
+        fs::write(right.join("file.txt"), "new\n").unwrap();
+
+        let mut app = DiffApp::open(left, right, output).unwrap();
+        let before = app.snapshot();
+        app.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('?'),
+            KeyModifiers::NONE,
+        ))
+        .unwrap();
+        assert!(app.show_help);
+        app.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))
+        .unwrap();
+        app.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        ))
+        .unwrap();
+
+        assert!(!app.show_help);
+        assert_eq!(app.scroll.horizontal_offset(), 8);
+        assert_eq!(app.snapshot(), before);
         fs::remove_dir_all(root).unwrap();
     }
 

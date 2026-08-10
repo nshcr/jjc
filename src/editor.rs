@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
+use crossterm::event::KeyModifiers;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Constraint;
@@ -28,6 +29,7 @@ use crate::render::set_vim_cursor_style;
 use crate::scroll::ViewScroll;
 use crate::scroll::scrollbar_area;
 use crate::scroll::terminal_offset;
+use crate::ui;
 use crate::vim::Vim;
 use crate::vim::VimMode;
 
@@ -66,6 +68,8 @@ pub struct Editor {
     command: String,
     profile: EditProfile,
     pending_empty_save: bool,
+    show_help: bool,
+    notice: Option<String>,
     scroll: ViewScroll,
     config: AppConfig,
     render_cache: StyledTextCache,
@@ -83,6 +87,8 @@ impl Editor {
             command: String::new(),
             profile,
             pending_empty_save: false,
+            show_help: false,
+            notice: None,
             scroll: ViewScroll::default(),
             config: AppConfig::load()?,
             render_cache: StyledTextCache::default(),
@@ -141,32 +147,62 @@ impl Editor {
                 );
                 frame.render_widget(Paragraph::new(self.status()), rows[1]);
 
-                let visible_y = self.scroll.visible_line(self.buffer.cursor_y(), height);
-                let visible_x = self.scroll.visible_column(cursor_column, width);
-                let x = rows[0].x + 1 + visible_x as u16;
-                let y = rows[0].y + 1 + visible_y as u16;
-                frame.set_cursor_position((x, y));
+                if self.show_help {
+                    ui::render_help(frame, "jjc edit help", EDIT_HELP);
+                } else {
+                    let visible_y = self.scroll.visible_line(self.buffer.cursor_y(), height);
+                    let visible_x = self.scroll.visible_column(cursor_column, width);
+                    let x = rows[0].x + 1 + visible_x as u16;
+                    let y = rows[0].y + 1 + visible_y as u16;
+                    frame.set_cursor_position((x, y));
+                }
             })?;
 
-            if self.handle_key(input::read_key()?)? {
-                return Ok(());
+            match input::read_event()? {
+                input::AppEvent::Key(key) if self.handle_key(key)? => return Ok(()),
+                input::AppEvent::Key(_) | input::AppEvent::Resize => {}
             }
         }
     }
 
     pub fn run_scripted(&mut self) -> io::Result<()> {
         loop {
-            if self.handle_key(input::read_key()?)? {
-                return Ok(());
+            match input::read_event()? {
+                input::AppEvent::Key(key) if self.handle_key(key)? => return Ok(()),
+                input::AppEvent::Key(_) | input::AppEvent::Resize => {}
             }
         }
     }
 
     pub fn apply_suggestion(&mut self, suggestion: AgentSuggestion) {
         self.buffer.apply(suggestion.into_command());
+        self.notice = None;
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> io::Result<bool> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('s') => return self.save(),
+                KeyCode::Char('c') => {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "edit canceled"));
+                }
+                _ => {}
+            }
+        }
+        if self.show_help {
+            if matches!(key.code, KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?')) {
+                self.show_help = false;
+            }
+            return Ok(false);
+        }
+        if key.code == KeyCode::F(1)
+            || (self.mode == Mode::Text
+                && self.vim.mode() == VimMode::Normal
+                && key.code == KeyCode::Char('?'))
+        {
+            self.show_help = true;
+            return Ok(false);
+        }
         match self.mode {
             Mode::Text => {
                 if self.vim.mode() == VimMode::Normal && key.code == KeyCode::Char(':') {
@@ -176,6 +212,7 @@ impl Editor {
                 }
                 if self.vim.handle_key(&mut self.buffer, key) {
                     self.pending_empty_save = false;
+                    self.notice = None;
                 }
                 Ok(false)
             }
@@ -198,6 +235,10 @@ impl Editor {
                     return Err(io::Error::new(io::ErrorKind::Interrupted, "edit canceled"));
                 }
                 _ => {
+                    self.notice = Some(format!(
+                        "unknown command :{}; press ? for help",
+                        self.command
+                    ));
                     self.command.clear();
                     self.mode = Mode::Text;
                     self.vim.set_normal();
@@ -209,20 +250,53 @@ impl Editor {
         Ok(false)
     }
 
-    fn status(&self) -> String {
+    fn status(&self) -> Line<'static> {
+        let large_content = is_large_content(self.buffer.lines());
+        let mut position = format!(
+            "line {}/{} col {}",
+            self.buffer.cursor_y() + 1,
+            self.buffer.lines().len().max(1),
+            self.buffer.cursor_byte() + 1
+        );
+        if large_content {
+            position.push_str(" | PLAIN LARGE FILE");
+        }
         match self.mode {
             Mode::Text if self.vim.mode() == VimMode::Normal => {
                 if self.pending_empty_save {
-                    return "EMPTY MESSAGE  edit content or :wq again to save anyway".to_owned();
+                    return ui::status_line(
+                        "CONFIRM",
+                        "empty message; save again to confirm",
+                        "Ctrl-S save anyway  Ctrl-C cancel  ? help",
+                    );
                 }
-                if is_large_content(self.buffer.lines()) {
-                    return "NORMAL  PLAIN LARGE FILE  syntax disabled  :wq save  :q! cancel"
-                        .to_owned();
+                if let Some(notice) = &self.notice {
+                    return ui::status_line(
+                        "NORMAL",
+                        notice.clone(),
+                        "Ctrl-S save  Ctrl-C cancel  ? help",
+                    );
                 }
-                "NORMAL  i/a/o insert  h/j/k/l/w/b/e move  x/dd delete  yy/p paste  u/C-r undo  :wq save  :q! cancel".to_owned()
+                ui::status_line(
+                    "NORMAL",
+                    position,
+                    "i insert  : command  Ctrl-S save  Ctrl-C cancel  ? help",
+                )
             }
-            Mode::Text => "INSERT  Esc normal".to_owned(),
-            Mode::Command => format!(":{}", self.command),
+            Mode::Text => ui::status_line(
+                "INSERT",
+                position,
+                "Esc normal  Ctrl-S save  Ctrl-C cancel  F1 help",
+            ),
+            Mode::Command => ui::status_line(
+                "COMMAND",
+                if large_content {
+                    format!(":{} | PLAIN LARGE FILE", self.command)
+                } else {
+                    format!(":{}", self.command)
+                },
+                "Enter run  Esc close  F1 help",
+            ),
         }
     }
 
@@ -264,6 +338,22 @@ impl Editor {
             .all(|line| line.trim().is_empty())
     }
 }
+
+const EDIT_HELP: &str = "Navigate
+  h/j/k/l, arrows     move
+  w/b/e, 0/^/$, gg/G  word and file motions
+  f/F/t/T, ;/,        find and repeat
+
+Edit
+  i/a/o (and Shift)   enter insert mode
+  x, dd, D, cc, C     delete or change
+  yy, p/P             yank and paste
+  u, Ctrl-R           undo and redo
+
+Finish
+  Ctrl-S or :wq       save and exit
+  Ctrl-C or :q!       cancel without writing
+  ? or F1             toggle this help";
 
 #[cfg(test)]
 mod tests {
@@ -320,7 +410,7 @@ mod tests {
         assert!(!editor.handle_key(enter()).unwrap());
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "\nJJ: comment\n");
-        assert!(editor.status().contains("EMPTY MESSAGE"));
+        assert!(editor.status().to_string().contains("empty message"));
 
         editor.handle_key(key(':')).unwrap();
         editor.handle_key(key('w')).unwrap();
@@ -401,6 +491,26 @@ mod tests {
         assert!(editor.handle_key(enter()).unwrap());
 
         assert_eq!(fs::read_to_string(path).unwrap(), "suggested\n");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn help_is_in_app_and_ctrl_s_is_a_global_save_action() {
+        let (root, path) = temp_file("original\n");
+        let mut editor = Editor::open(path.clone()).unwrap();
+
+        editor.handle_key(key('?')).unwrap();
+        assert!(editor.show_help);
+        editor.handle_key(esc()).unwrap();
+        editor.handle_key(key('i')).unwrap();
+        editor.handle_key(key('X')).unwrap();
+        assert!(
+            editor
+                .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+                .unwrap()
+        );
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "Xoriginal\n");
         fs::remove_dir_all(root).unwrap();
     }
 

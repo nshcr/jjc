@@ -15,7 +15,7 @@ fn jj_resolve_can_choose_different_sides_for_two_prefilled_blocks() -> io::Resul
     let repo = two_block_conflict_repo("different-sides")?;
 
     let output = jj(repo.path())
-        .env("JJC_KEYS", "3n1:wq<Enter>")
+        .env("JJC_KEYS", "31:wq<Enter>")
         .args(merge_editor_config())
         .args(["resolve", "--tool", "jjc", "root:file.txt"])
         .output()?;

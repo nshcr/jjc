@@ -187,6 +187,74 @@ fn diff_manual_edit_scrolls_horizontally_by_terminal_cell_width() -> io::Result<
 }
 
 #[test]
+fn diff_selection_scrolls_horizontally_without_entering_edit_mode() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let left = root.join("left");
+    let right = root.join("right");
+    let output = root.join("output");
+    let log = root.join("tty.log");
+    fs::create_dir_all(&left)?;
+    fs::create_dir_all(&right)?;
+    fs::create_dir_all(&output)?;
+    fs::write(left.join("file.txt"), "old\n")?;
+    fs::write(right.join("file.txt"), format!("{}TAIL\n", "中".repeat(50)))?;
+
+    expect_alt_screen_after_keys(
+        &log,
+        jjc(),
+        &[
+            s("diff"),
+            path_arg(&left),
+            path_arg(&right),
+            path_arg(&output),
+        ],
+        "\x1b[C\x1b[C",
+        "TAIL",
+        "w",
+    )?;
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn diff_help_is_visible_without_leaving_the_terminal_flow() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let left = root.join("left");
+    let right = root.join("right");
+    let output = root.join("output");
+    let log = root.join("tty.log");
+    fs::create_dir_all(&left)?;
+    fs::create_dir_all(&right)?;
+    fs::create_dir_all(&output)?;
+    fs::write(left.join("file.txt"), "old\n")?;
+    fs::write(right.join("file.txt"), "new\n")?;
+
+    expect_alt_screen_after_keys(
+        &log,
+        jjc(),
+        &[
+            s("diff"),
+            path_arg(&left),
+            path_arg(&right),
+            path_arg(&output),
+        ],
+        "?",
+        "keep only current hunk",
+        "?w",
+    )?;
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn merge_tty_scrolls_output_pane() -> io::Result<()> {
     if !expect_available() {
         return Ok(());
@@ -425,11 +493,11 @@ fn jj_split_tty_can_select_one_changed_line_inside_a_hunk() -> io::Result<()> {
         &log,
         "jj",
         &jj_args(&repo, ["split", "--tool", "jjc", "-m", "selected"]),
-        "nxw",
+        "Ow",
     )?;
 
     assert_alt_screen_log(&log)?;
-    assert_eq!(file_show(&repo, "@-", "file.txt")?, "a\nold1\nc\nnew2\ne\n");
+    assert_eq!(file_show(&repo, "@-", "file.txt")?, "a\nnew1\nc\nold2\ne\n");
     fs::remove_dir_all(root)?;
     Ok(())
 }
