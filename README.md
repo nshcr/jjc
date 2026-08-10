@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/nshcr/jjc/actions/workflows/ci.yml/badge.svg)](https://github.com/nshcr/jjc/actions/workflows/ci.yml)
 [![Rust 1.93.1+](https://img.shields.io/badge/rust-1.93.1%2B-orange.svg)](https://www.rust-lang.org)
-[![Jujutsu](https://img.shields.io/badge/Jujutsu-0.43.0_baseline-blueviolet.svg)](https://jj-vcs.github.io/jj/)
+[![Jujutsu](https://img.shields.io/badge/Jujutsu-0.44.0_baseline-blueviolet.svg)](https://docs.jj-vcs.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **One terminal-native editor for Jujutsu commit messages, interactive diffs, and merge conflicts.**
@@ -19,12 +19,12 @@ It is a single Rust binary with no GUI runtime. Text, diff, and merge views shar
 Tree-sitter syntax highlighting and Unicode-aware terminal rendering.
 
 > [!IMPORTANT]
-> `jjc` is experimental. The tested protocol baseline is `jj 0.43.0`; see
+> `jjc` is experimental. The tested protocol baseline is `jj 0.44.0`; see
 > [Current limits](#current-limits) before relying on it for unusual conflicts.
 
 ## Quick start
 
-Requires Rust 1.93.1 or newer and [`jj`](https://jj-vcs.github.io/jj/latest/install-and-setup/).
+Requires Rust 1.93.1 or newer and [`jj`](https://docs.jj-vcs.dev/latest/install-and-setup/).
 
 ```sh
 cargo install --locked --git https://github.com/nshcr/jjc
@@ -77,13 +77,18 @@ jj resolve --tool jjc    # merge editor
 
 - Vim-like editing with motions, operators, undo/redo, yanking, and find motions
 - Whole-hunk, line-level, file-level, and Rust function-aware diff selection
+- One-key “only this hunk/line” choices, global selection presets, and long-line
+  panning without entering manual edit mode
 - Added/deleted files, executable-bit changes, symlinks, and binary diffs
 - Per-conflict-block resolution for ordinary UTF-8 three-way merges
+- Automatic next-conflict focus, conflict progress, and safe all-left/base/right
+  commands for repetitive resolutions
 - Binary merge resolution by choosing the left, base, or right side
 - Tree-sitter highlighting for C, C++, Go, JavaScript, JSON, Python, Rust,
   TypeScript, TSX, and JSX
 - Correct cursor and horizontal scrolling behavior for CJK text, emoji,
   combining marks, tabs, and long lines
+- In-app `?` / `F1` help plus consistent `Ctrl-S` save and `Ctrl-C` cancel
 - Shared structured edit-command layer for future agent integrations
 
 ## Commands
@@ -111,7 +116,8 @@ jjc merge <left> <base> <right> <output> --marker-length <n> --path <repo-path>
 - Operators and text objects include `dw`, `cw`, `yw`, `d$`, `c$`, `y$`,
   `df`, `ct`, `yf`, `ciw`, `diw`, `yiw`, `guw`, `gUw`, and `g~w`
 - Undo and redo: `u`, `Ctrl-r`
-- Save and quit: `:wq`; discard: `:q!`
+- Save and quit: `:wq` or `Ctrl-S`; discard: `:q!` or `Ctrl-C`
+- In-app help: `?` or `F1`
 
 </details>
 
@@ -120,14 +126,19 @@ jjc merge <left> <base> <right> <output> --marker-length <n> --path <repo-path>
 
 - Move between hunks: `j`, `k`
 - Move between files: `[`, `]`
-- Move inside an expanded hunk: `n`, `p`, `PageUp`, `PageDown`
-- Toggle the current hunk: `Space`
+- Move between changed lines inside an expanded hunk: `n`, `p`, `PageUp`,
+  `PageDown`
+- Pan a long diff line: `h`, `l`, `Left`, `Right`
+- Toggle the current hunk: `Space`; toggle and advance: `Enter`
 - Toggle the current line or replacement pair: `x`
+- Select or deselect the whole diff: `s`, `d`
 - Select or deselect the current file: `S`, `D`
+- Keep only the current hunk or changed line: `o`, `O`
 - Toggle the current Rust function: `f`
 - Undo or redo selection changes: `u`, `r`
 - Manually edit the current file output: `e`
-- Write output: `w`; cancel: `q`
+- Write output: `w` or `Ctrl-S`; cancel: `q` or `Ctrl-C`
+- In-app help: `?` or `F1`
 
 </details>
 
@@ -135,9 +146,13 @@ jjc merge <left> <base> <right> <output> --marker-length <n> --path <repo-path>
 <summary>Merge editor keys</summary>
 
 - Move between conflict blocks: `n`, `p`
-- Accept left, base, or right: `1`, `2`, `3`
-- Write text output: `:wq`; cancel: `q`
+- Accept left, base, or right and focus the next conflict: `1`, `2`, `3`
+- Accept one side for all remaining blocks: `:al` / `:all-left`, `:ab` /
+  `:all-base`, `:ar` / `:all-right`
+- Write text output: `:wq`, `Ctrl-S`, or `Enter` once all parsed conflicts
+  are resolved; cancel: `q` or `Ctrl-C`
 - For binary conflicts, choose a side with `1`, `2`, or `3`, then write with `w`
+- In-app help: `?` or `F1`
 
 </details>
 
@@ -193,7 +208,8 @@ JJC_REQUIRE_INTEGRATION=1 cargo test --locked \
 ## Current limits
 
 - The external `jj` merge-tool protocol cannot currently express deletion as
-  the merge result through `jjc`.
+  the merge result through `jjc`. Empty output therefore requires a second
+  confirmation and means “empty regular file,” not “delete this path.”
 - `jj` rejects some non-normal-file and unresolved executable-bit conflicts
   before invoking an external merge tool.
 - Visual mode, cross-line motion ranges, broader text objects, macros,
@@ -203,8 +219,9 @@ JJC_REQUIRE_INTEGRATION=1 cargo test --locked \
 
 For design details and planned work, see the
 [development roadmap](docs/development-plan.md). The
-[Phase 4 plan](docs/phase-4-development-plan.md) records the current correctness
-and release gates.
+[Phase 5 plan](docs/phase-5-terminal-ux-plan.md) records the current terminal UX
+and local acceptance gates; [Phase 4](docs/phase-4-development-plan.md) remains
+the historical correctness baseline.
 
 ## Development
 

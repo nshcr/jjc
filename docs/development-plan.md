@@ -3,13 +3,15 @@
 This document is the canonical product roadmap for `jjc`. Detailed historical
 work and acceptance evidence live in the phase documents linked below.
 
-Status as of 2026-07-10:
+Status as of 2026-08-10:
 
 - Foundation milestones and Phase 2 are complete within their recorded scope.
 - Phase 3 features are implemented, but later review found integration and
   release-gate gaps that its original completion wording did not capture.
 - [Phase 4](phase-4-development-plan.md) is complete within its supported local
   boundaries. The hosted CI result remains pending external evidence.
+- [Phase 5](phase-5-terminal-ux-plan.md) is implemented and locally verified;
+  its hosted CI result remains pending external evidence.
 
 ## Product contract
 
@@ -172,20 +174,23 @@ The checkout already contains:
 - Whole-hunk, line, function, file, added/deleted, binary, executable, symlink,
   and manual-output diff choices. Regular-file/symlink transitions are
   supported; directory/special transitions fail before output mutation.
+- Global and “only current” diff presets, changed-line navigation, selection-mode
+  horizontal panning, partial-selection indicators, and in-app help.
 - Ordinary text and binary normal-file merge choices, exact dynamic Git diff3
-  marker parsing, multi-block choices, and partial resolution.
+  marker parsing, safe accept-and-advance, batch side choices, conflict progress,
+  empty-output confirmation, and partial resolution.
 - Grapheme-safe editing, terminal-cell horizontal viewports for text-editing
   surfaces, fingerprint-cached highlighting, and a `512 KiB` plain fallback.
 - Description, sparse, and generic `ui.editor` profiles.
 - Scripted real-`jj` smoke tests, eight tree-entry integrations, three dynamic
-  marker integrations, and a fixed-size replayed 19-test PTY suite.
+  marker integrations, and a fixed-size replayed 21-test PTY suite.
 - A read-only `jjc doctor` whose generated config is exercised through all three
-  routes.
+  routes and whose version status distinguishes the tested protocol from drift.
 - Rust 1.93.1 metadata and CI matrices for formatting, clippy, tests, pinned
-  `jj 0.43.0`, installation, and latest-`jj` advisory probing.
+  `jj 0.44.0`, installation, and latest-`jj` advisory probing.
 
-The final Phase 4 local gate passed from the converged working state. After the
-branch is published, the hosted CI result remains separate external evidence.
+The Phase 5 local gate passed from the converged working state. After the branch
+is published, the hosted CI result remains separate external evidence.
 
 ## Roadmap
 
@@ -226,7 +231,8 @@ claims without erasing the implementation history.
 
 ### Phase 4: complete within the supported local boundary
 
-[Phase 4](phase-4-development-plan.md) is the current acceptance source:
+[Phase 4](phase-4-development-plan.md) remains the correctness and release-gate
+source for its recorded `jj 0.43.0` snapshot:
 
 1. P4.1 implements safe executable/symlink diff entries and fail-before-write
    rejection for directory/special/unsafe-output cases.
@@ -242,9 +248,18 @@ claims without erasing the implementation history.
 The documented final local gate passed from the converged working state. Hosted
 CI remains separate external evidence until the workflow actually runs.
 
+### Phase 5: terminal interaction convergence
+
+[Phase 5](phase-5-terminal-ux-plan.md) is the current UX acceptance source. It
+adds a shared help/status shell and consistent global save/cancel actions,
+reduces diff selection to global and “only current” operations, makes long diff
+lines inspectable without manual editing, and makes merge block choices safe,
+progressive, and batchable. It also moves the live protocol gate to `jj 0.44.0`
+while preserving Phase 4 as historical evidence.
+
 ### Later product work
 
-After Phase 4 closes, separately design and prioritize:
+After Phase 5 closes, separately design and prioritize:
 
 - Visual mode and broader Vim compatibility.
 - Search and larger navigation surfaces.
@@ -254,7 +269,7 @@ After Phase 4 closes, separately design and prioritize:
   external tool protocol cannot represent.
 
 No agent runtime, background write path, plugin system, or `jj_lib` dependency
-is implied by Phase 4.
+is implied by Phase 5.
 
 ## Upstream merge boundary
 
@@ -263,6 +278,10 @@ conflicts that `jj` can materialize for an external tool. Current upstream
 limitations include deletion as the chosen result, non-normal tree entries,
 unresolved executable-bit conflicts, file/directory conflicts, symlink
 conflicts, and conflicts with more than two sides.
+
+An empty `$output` is not a deletion signal. On the current `jj 0.44.0`
+protocol it can resolve to an empty regular file, so `jjc` requires explicit
+confirmation before returning empty output.
 
 Phase 4 does not promise local support for shapes that `jj` rejects before
 invoking `jjc` or that cannot be faithfully returned through one `$output`
