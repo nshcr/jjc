@@ -56,7 +56,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes expect
       - name: Install jj
-        run: cargo install --locked jj-cli --version 0.43.0
+        run: cargo install --locked jj-cli --version 0.44.0
       - run: jj --version
       - name: Install jjc from the locked graph
         run: cargo install --locked --path . --root target/install-check --force

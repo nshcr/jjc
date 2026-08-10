@@ -2,7 +2,15 @@ use std::env;
 use std::io;
 use std::process::Command;
 
-pub const TESTED_JJ_PROTOCOL_BASELINE: &str = "0.43.0";
+pub const TESTED_JJ_PROTOCOL_BASELINE: &str = "0.44.0";
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum JjCompatibility {
+    Tested,
+    OlderUntested,
+    NewerUntested,
+    Unknown,
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct DoctorReport {
@@ -19,9 +27,26 @@ impl DoctorReport {
     pub fn text(&self) -> String {
         let mut text = String::from("jjc doctor\n\n");
         match (&self.jj_version, &self.jj_error) {
-            (Some(version), _) => {
-                text.push_str(&format!("ok jj: {version}\n"));
-            }
+            (Some(version), _) => match self.compatibility() {
+                JjCompatibility::Tested => {
+                    text.push_str(&format!("ok jj: {version} (tested protocol)\n"));
+                }
+                JjCompatibility::OlderUntested => {
+                    text.push_str(&format!(
+                            "warning jj: {version} is older than tested protocol {TESTED_JJ_PROTOCOL_BASELINE}\n"
+                        ));
+                }
+                JjCompatibility::NewerUntested => {
+                    text.push_str(&format!(
+                            "warning jj: {version} is newer than tested protocol {TESTED_JJ_PROTOCOL_BASELINE}\n"
+                        ));
+                }
+                JjCompatibility::Unknown => {
+                    text.push_str(&format!(
+                            "warning jj: could not compare {version:?} with tested protocol {TESTED_JJ_PROTOCOL_BASELINE}\n"
+                        ));
+                }
+            },
             (None, Some(error)) => {
                 text.push_str(&format!("missing jj: {error}\n"));
             }
@@ -36,6 +61,20 @@ impl DoctorReport {
         text.push_str("recommended jj config:\n");
         text.push_str(&recommended_config(&self.jjc_program));
         text
+    }
+
+    fn compatibility(&self) -> JjCompatibility {
+        let Some(version) = self.jj_version.as_deref().and_then(version_triplet) else {
+            return JjCompatibility::Unknown;
+        };
+        let Some(baseline) = version_triplet(TESTED_JJ_PROTOCOL_BASELINE) else {
+            return JjCompatibility::Unknown;
+        };
+        match version.cmp(&baseline) {
+            std::cmp::Ordering::Less => JjCompatibility::OlderUntested,
+            std::cmp::Ordering::Equal => JjCompatibility::Tested,
+            std::cmp::Ordering::Greater => JjCompatibility::NewerUntested,
+        }
     }
 }
 
@@ -100,6 +139,22 @@ fn toml_string(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+fn version_triplet(value: &str) -> Option<(u64, u64, u64)> {
+    value.split_whitespace().find_map(|part| {
+        let part = part.trim_start_matches('v');
+        let mut numbers = part.split('.');
+        let major = numbers.next()?.parse().ok()?;
+        let minor = numbers.next()?.parse().ok()?;
+        let patch = numbers
+            .next()?
+            .split(|character: char| !character.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()?;
+        Some((major, minor, patch))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,8 +201,36 @@ mod tests {
         assert!(
             report
                 .text()
-                .contains("tested jj protocol baseline: 0.43.0")
+                .contains("tested jj protocol baseline: 0.44.0")
         );
         assert!(report.text().contains("recommended jj config:"));
+    }
+
+    #[test]
+    fn reports_exact_and_drifted_jj_versions_truthfully() {
+        let tested = DoctorReport {
+            jj_version: Some("jj 0.44.0".to_owned()),
+            jj_error: None,
+            jjc_program: "jjc".to_owned(),
+        };
+        let newer = DoctorReport {
+            jj_version: Some("jj 0.45.1".to_owned()),
+            jj_error: None,
+            jjc_program: "jjc".to_owned(),
+        };
+
+        assert_eq!(tested.compatibility(), JjCompatibility::Tested);
+        assert!(tested.text().contains("ok jj: jj 0.44.0 (tested protocol)"));
+        assert_eq!(newer.compatibility(), JjCompatibility::NewerUntested);
+        assert!(newer.text().contains("warning jj:"));
+        assert!(!newer.text().contains("ok jj:"));
+    }
+
+    #[test]
+    fn parses_plain_and_decorated_jj_versions() {
+        assert_eq!(version_triplet("0.44.0"), Some((0, 44, 0)));
+        assert_eq!(version_triplet("jj 0.44.0"), Some((0, 44, 0)));
+        assert_eq!(version_triplet("jj 0.44.0-git"), Some((0, 44, 0)));
+        assert_eq!(version_triplet("unknown"), None);
     }
 }
