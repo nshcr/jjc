@@ -20,10 +20,11 @@ code/config review found three gaps:
   platform compatibility gate.
 
 [Phase 4](phase-4-development-plan.md) supersedes those closure claims while
-preserving the Phase 3 implementation history. Its implementation now closes
-the three local gaps; the final local full gate and hosted CI result remain
-pending evidence. P3.2 navigation and the P3.3/P3.4 mechanisms remain
-regression baselines.
+preserving the Phase 3 implementation history. Its implementation closes the
+three local gaps and records the final local gate. Hosted CI remains
+revision-bound external evidence rather than a permanent historical phase
+status. P3.2 navigation and the P3.3/P3.4 mechanisms remain regression
+baselines.
 
 ## Goal contract
 

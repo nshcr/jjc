@@ -31,9 +31,10 @@ cargo install --locked --git https://github.com/nshcr/jjc
 jjc doctor
 ```
 
-Prebuilt archives for Linux, macOS, and Windows are available from
+Tagged releases publish prebuilt archives for Linux, macOS, and Windows on
 [GitHub Releases](https://github.com/nshcr/jjc/releases). Each release includes
-a `SHA256SUMS` file for artifact verification.
+a `SHA256SUMS` file and build-provenance attestations. If no tagged release is
+listed yet, install the locked source build shown above.
 
 Add the configuration printed by `jjc doctor`, or copy this into your `jj`
 config:
@@ -196,14 +197,17 @@ extensions fall back to plain text.
 CI builds the library and binary on Linux, macOS, and Windows. Linux and macOS
 also run real `jj` and PTY integration tests. A scheduled advisory job probes
 the latest available `jj` without making that version part of the support claim.
+The current version and platform contract is in the
+[support policy](docs/support.md).
 
 ```sh
-cargo fmt --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-targets --all-features
-JJC_REQUIRE_INTEGRATION=1 cargo test --locked \
-  --test smoke --test tty --test diff_tree_entries --test merge_markers
+./scripts/verify.sh fast
+./scripts/verify.sh full
 ```
+
+The full gate is Linux/macOS-only and requires Rust 1.93.1, `jj 0.44.0`, and
+Expect. It rejects missing prerequisites and protocol-version drift instead of
+silently skipping integration coverage.
 
 ## Current limits
 
@@ -228,12 +232,15 @@ the historical correctness baseline.
 ```sh
 git clone https://github.com/nshcr/jjc.git
 cd jjc
-cargo test --locked --all-targets --all-features
+./scripts/verify.sh fast
 cargo run -- doctor
 ```
 
 Contributions and focused bug reports are welcome. If an issue depends on `jj`
 behavior, include the output of `jj --version` and `jjc doctor`.
+
+See the [documentation index](docs/README.md) for support, engineering
+governance, roadmap, and release procedures.
 
 ## License
 
