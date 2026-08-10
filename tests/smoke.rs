@@ -1,3 +1,5 @@
+mod support;
+
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -6,6 +8,7 @@ use std::process::Command;
 use std::process::Output;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+use support::jj_available;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -669,14 +672,6 @@ fn jj_resolve_multi_side_conflict_stays_protocol_limited() -> io::Result<()> {
     assert_success_ref(&output);
     assert!(String::from_utf8_lossy(&output.stdout).contains("3-sided"));
     Ok(())
-}
-
-fn jj_available() -> bool {
-    let available = Command::new("jj").arg("--version").output().is_ok();
-    if !available && std::env::var_os("JJC_REQUIRE_INTEGRATION").is_some() {
-        panic!("jj is required when JJC_REQUIRE_INTEGRATION is set");
-    }
-    available
 }
 
 fn init_repo(name: &str) -> io::Result<PathBuf> {

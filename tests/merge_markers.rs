@@ -1,3 +1,5 @@
+mod support;
+
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -6,6 +8,7 @@ use std::process::Command;
 use std::process::Output;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+use support::jj_available;
 
 #[test]
 fn jj_resolve_can_choose_different_sides_for_two_prefilled_blocks() -> io::Result<()> {
@@ -237,14 +240,6 @@ fn assert_no_conflicts(repo: &Path) -> io::Result<()> {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("No conflicts found"));
     Ok(())
-}
-
-fn jj_available() -> bool {
-    let available = Command::new("jj").arg("--version").output().is_ok();
-    if !available && std::env::var_os("JJC_REQUIRE_INTEGRATION").is_some() {
-        panic!("jj is required when JJC_REQUIRE_INTEGRATION is set");
-    }
-    available
 }
 
 fn jjc() -> &'static str {

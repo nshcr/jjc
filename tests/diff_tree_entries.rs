@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+mod support;
+
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -12,6 +14,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+use support::jj_available;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -295,14 +298,6 @@ fn revision_diff(repo: &Path, revision: &str) -> io::Result<String> {
     let output = jj(repo).args(["diff", "--git", "-r", revision]).output()?;
     assert_success_ref(&output);
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-fn jj_available() -> bool {
-    let available = Command::new("jj").arg("--version").output().is_ok();
-    if !available && std::env::var_os("JJC_REQUIRE_INTEGRATION").is_some() {
-        panic!("jj is required when JJC_REQUIRE_INTEGRATION is set");
-    }
-    available
 }
 
 fn is_executable(path: &Path) -> io::Result<bool> {

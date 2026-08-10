@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+mod support;
+
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -10,6 +12,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+use support::jj_available;
 
 static TEMP_ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -570,22 +573,6 @@ fn expect_cursor_style_switch(log: &Path, program: &str, args: &[String]) -> io:
     Ok(())
 }
 
-fn expect_available() -> bool {
-    let available = Command::new("expect").arg("-v").output().is_ok();
-    if !available && std::env::var_os("JJC_REQUIRE_INTEGRATION").is_some() {
-        panic!("expect is required when JJC_REQUIRE_INTEGRATION is set");
-    }
-    available
-}
-
-fn jj_available() -> bool {
-    let available = Command::new("jj").arg("--version").output().is_ok();
-    if !available && std::env::var_os("JJC_REQUIRE_INTEGRATION").is_some() {
-        panic!("jj is required when JJC_REQUIRE_INTEGRATION is set");
-    }
-    available
-}
-
 fn jjc() -> &'static str {
     env!("CARGO_BIN_EXE_jjc")
 }
@@ -1025,6 +1012,28 @@ fn expect_exact_script(value: &str) -> String {
 
 fn expect_eof_script() -> &'static str {
     "expect {\neof {}\ntimeout {catch {close}; catch {wait}; exit 124}\n}\n"
+}
+
+fn expect_available() -> bool {
+    match Command::new("expect").arg("-v").output() {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            if std::env::var_os("JJC_REQUIRE_INTEGRATION").is_some() {
+                panic!(
+                    "expect -v exited with {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            false
+        }
+        Err(error) => {
+            if std::env::var_os("JJC_REQUIRE_INTEGRATION").is_some() {
+                panic!("failed to run expect -v: {error}");
+            }
+            false
+        }
+    }
 }
 
 fn toml_string(value: &str) -> String {
