@@ -1014,7 +1014,7 @@ fn expect_edit_alt_screen_after_resize(
     // Drive keys through Crossterm before resizing so its lazy SIGWINCH handler is ready.
     // Expect's stty resize wakes the child on macOS, but Ubuntu needs an explicit SIGWINCH.
     let script = format!(
-        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 5 columns 100}}\nspawn {program} {args}\n{enter}{initial_expected}send -- \"i\"\n{insert_cursor}send -- \"\\033\"\n{normal_cursor}stty rows 24 columns 100 < $spawn_out(slave,name)\nif {{$tcl_platform(os) eq \"Linux\"}} {{exec kill -WINCH [exp_pid] 2>@1}}\n{resized_expected}send -- {exit_keys}\n{cursor_default}{leave}{eof}set wait_result [wait]\nexit [lindex $wait_result 3]\n",
+        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 5 columns 100}}\nspawn {program} {args}\n{enter}{initial_expected}send -- \"i\"\n{insert_cursor}send -- \"\\033\"\n{normal_cursor}stty rows 24 columns 100 < $spawn_out(slave,name)\nif {{$tcl_platform(os) eq \"Linux\"}} {{exec kill -WINCH [exp_pid] 2>@1}}\n{resized_expected}after 200\nsend -- {exit_keys}\n{cursor_default}{leave}{eof}set wait_result [wait]\nexit [lindex $wait_result 3]\n",
         log = tcl_word(&path_arg(log)),
         program = tcl_word(program),
         args = args
