@@ -148,6 +148,21 @@ Observed local results:
 This is verified-local evidence. It is not hosted CI, another operating system,
 or production field evidence.
 
+## Terminal test maintenance (2026-08-12)
+
+The replayed PTY suite now contains 29 tests. Eight added scenarios exercise
+real `Ctrl-S` and `Ctrl-C` bytes across edit, diff, and merge flows, no-write
+cancellation after in-memory changes, both empty-output confirmation paths,
+resize-triggered redraw, and the interleaved diff selection/manual-edit history
+regression. The shared harness now also requires the default cursor-shape escape
+before leaving the alternate screen, including expected non-zero cancellation
+exits.
+
+The focused `cargo test --locked --test tty` gate passed all 29 tests locally,
+and `./scripts/verify.sh full` passed the complete formatting, Clippy, unit,
+real-`jj`, PTY, offline-install, and installed-doctor gate. Hosted CI remains
+separate evidence.
+
 ## Deferred work
 
 Phase 5 does not add Visual mode, search, mouse input, adaptive merge-pane
