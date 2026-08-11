@@ -183,7 +183,8 @@ The checkout already contains:
   surfaces, fingerprint-cached highlighting, and a `512 KiB` plain fallback.
 - Description, sparse, and generic `ui.editor` profiles.
 - Scripted real-`jj` smoke tests, eight tree-entry integrations, three dynamic
-  marker integrations, and a fixed-size replayed 21-test PTY suite.
+  marker integrations, and a 29-test replayed PTY suite covering fixed and
+  resized terminals, real control keys, guarded saves, and cleanup on cancel.
 - A read-only `jjc doctor` whose generated config is exercised through all three
   routes and whose version status distinguishes the tested protocol from drift.
 - Rust 1.93.1 metadata and CI matrices for formatting, clippy, tests, pinned

@@ -34,6 +34,78 @@ fn tui_leaves_alternate_screen_on_exit() -> io::Result<()> {
 }
 
 #[test]
+fn edit_tty_ctrl_c_discards_changes_and_restores_terminal() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let message = root.join("message.txt");
+    let log = root.join("tty.log");
+    fs::write(&message, "message\n")?;
+
+    expect_alt_screen_cancel(
+        &log,
+        jjc(),
+        &[s("edit"), path_arg(&message)],
+        "iX\x03",
+        "edit canceled",
+    )?;
+
+    assert_eq!(fs::read_to_string(&message)?, "message\n");
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn edit_tty_empty_description_requires_second_ctrl_s() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let message = root.join("description.jjdescription");
+    let log = root.join("tty.log");
+    fs::write(&message, "draft\nJJ: describe the change\n")?;
+
+    expect_alt_screen_after_keys(
+        &log,
+        jjc(),
+        &[s("edit"), path_arg(&message)],
+        "dd\x13",
+        "empty message; save again to confirm",
+        "\x13",
+    )?;
+
+    assert_eq!(fs::read_to_string(&message)?, "JJ: describe the change\n");
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn edit_tty_redraws_after_terminal_resize() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let message = root.join("message.txt");
+    let log = root.join("tty.log");
+    let content = numbered_lines("line", 30);
+    fs::write(&message, &content)?;
+
+    expect_alt_screen_after_resize(
+        &log,
+        jjc(),
+        &[s("edit"), path_arg(&message)],
+        "line-001",
+        "line-015",
+        "\x13",
+    )?;
+
+    assert_eq!(fs::read_to_string(&message)?, content);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn edit_tty_scrolls_to_long_file_cursor() -> io::Result<()> {
     if !expect_available() {
         return Ok(());
@@ -258,6 +330,107 @@ fn diff_help_is_visible_without_leaving_the_terminal_flow() -> io::Result<()> {
 }
 
 #[test]
+fn diff_tty_ctrl_c_discards_selection_and_restores_terminal() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let left = root.join("left");
+    let right = root.join("right");
+    let output = root.join("output");
+    let log = root.join("tty.log");
+    fs::create_dir_all(&left)?;
+    fs::create_dir_all(&right)?;
+    fs::create_dir_all(&output)?;
+    fs::write(left.join("file.txt"), "a\nold\nc\n")?;
+    fs::write(right.join("file.txt"), "a\nnew\nc\n")?;
+
+    expect_alt_screen_cancel(
+        &log,
+        jjc(),
+        &[
+            s("diff"),
+            path_arg(&left),
+            path_arg(&right),
+            path_arg(&output),
+        ],
+        " \x03",
+        "diff canceled",
+    )?;
+
+    assert_eq!(fs::read_dir(&output)?.count(), 0);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn diff_tty_ctrl_s_writes_selected_output() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let left = root.join("left");
+    let right = root.join("right");
+    let output = root.join("output");
+    let log = root.join("tty.log");
+    fs::create_dir_all(&left)?;
+    fs::create_dir_all(&right)?;
+    fs::create_dir_all(&output)?;
+    fs::write(left.join("file.txt"), "a\nold\nc\n")?;
+    fs::write(right.join("file.txt"), "a\nnew\nc\n")?;
+
+    expect_alt_screen(
+        &log,
+        jjc(),
+        &[
+            s("diff"),
+            path_arg(&left),
+            path_arg(&right),
+            path_arg(&output),
+        ],
+        " \x13",
+    )?;
+
+    assert_alt_screen_log(&log)?;
+    assert_eq!(fs::read_to_string(output.join("file.txt"))?, "a\nold\nc\n");
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn diff_tty_manual_edit_survives_stale_selection_undo() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let left = root.join("left");
+    let right = root.join("right");
+    let output = root.join("output");
+    let log = root.join("tty.log");
+    fs::create_dir_all(&left)?;
+    fs::create_dir_all(&right)?;
+    fs::create_dir_all(&output)?;
+    fs::write(left.join("file.txt"), "old\n")?;
+    fs::write(right.join("file.txt"), "new\n")?;
+
+    expect_diff_manual_edit_history(
+        &log,
+        jjc(),
+        &[
+            s("diff"),
+            path_arg(&left),
+            path_arg(&right),
+            path_arg(&output),
+        ],
+    )?;
+
+    assert_alt_screen_log(&log)?;
+    assert_eq!(fs::read_to_string(output.join("file.txt"))?, "Xold\n");
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn merge_tty_scrolls_output_pane() -> io::Result<()> {
     if !expect_available() {
         return Ok(());
@@ -331,6 +504,88 @@ fn merge_output_scrolls_horizontally_by_terminal_cell_width() -> io::Result<()> 
         ":wq\r",
     )?;
 
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn merge_tty_ctrl_c_discards_accepted_side_and_restores_terminal() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let left = root.join("left.txt");
+    let base = root.join("base.txt");
+    let right = root.join("right.txt");
+    let output = root.join("output.txt");
+    let log = root.join("tty.log");
+    fs::write(&left, "left\n")?;
+    fs::write(&base, "base\n")?;
+    fs::write(&right, "right\n")?;
+    fs::write(&output, "original\n")?;
+
+    expect_alt_screen_cancel(
+        &log,
+        jjc(),
+        &[
+            s("merge"),
+            path_arg(&left),
+            path_arg(&base),
+            path_arg(&right),
+            path_arg(&output),
+            s("--marker-length"),
+            s("7"),
+            s("--path"),
+            s("file.txt"),
+        ],
+        "3\x03",
+        "merge canceled",
+    )?;
+
+    assert_eq!(fs::read_to_string(&output)?, "original\n");
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn merge_tty_empty_side_requires_second_ctrl_s() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let left = root.join("left.txt");
+    let base = root.join("base.txt");
+    let right = root.join("right.txt");
+    let output = root.join("output.txt");
+    let log = root.join("tty.log");
+    fs::write(&left, "")?;
+    fs::write(&base, "base\n")?;
+    fs::write(&right, "right\n")?;
+    fs::write(
+        &output,
+        "<<<<<<< left\n||||||| base\nbase\n=======\nright\n>>>>>>> right\n",
+    )?;
+
+    expect_alt_screen_after_keys(
+        &log,
+        jjc(),
+        &[
+            s("merge"),
+            path_arg(&left),
+            path_arg(&base),
+            path_arg(&right),
+            path_arg(&output),
+            s("--marker-length"),
+            s("7"),
+            s("--path"),
+            s("file.txt"),
+        ],
+        "1\x13",
+        "empty output creates an empty file; it cannot express deletion",
+        "\x13",
+    )?;
+
+    assert_eq!(fs::read(&output)?, Vec::<u8>::new());
     fs::remove_dir_all(root)?;
     Ok(())
 }
@@ -711,6 +966,100 @@ fn expect_alt_screen(log: &Path, program: &str, args: &[String], keys: &str) -> 
     Ok(())
 }
 
+fn expect_alt_screen_cancel(
+    log: &Path,
+    program: &str,
+    args: &[String],
+    keys: &str,
+    expected_error: &str,
+) -> io::Result<()> {
+    let script = format!(
+        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 24 columns 100}}\nspawn {program} {args}\n{enter}send -- {keys}\n{cursor_default}{leave}{eof}set wait_result [wait]\nif {{[llength $wait_result] != 4 || [lindex $wait_result 2] != 0 || [lindex $wait_result 3] != 1}} {{\nputs stderr \"expected normal child exit 1, got $wait_result\"\nexit 126\n}}\nexit 0\n",
+        log = tcl_word(&path_arg(log)),
+        program = tcl_word(program),
+        args = args
+            .iter()
+            .map(|arg| tcl_word(arg))
+            .collect::<Vec<_>>()
+            .join(" "),
+        enter = expect_exact_script("\x1b[?1049h"),
+        keys = tcl_string(keys),
+        cursor_default = expect_exact_script("\x1b[0 q"),
+        leave = expect_exact_script("\x1b[?1049l"),
+        eof = expect_eof_script(),
+    );
+    let output = Command::new("expect").arg("-c").arg(script).output()?;
+    assert_success(output);
+    assert_alt_screen_log(log)?;
+    let log_text = String::from_utf8_lossy(&fs::read(log)?).into_owned();
+    assert!(
+        log_text.contains(expected_error),
+        "terminal log should contain cancellation error {expected_error:?}"
+    );
+    assert!(
+        !log_text.contains("panicked at"),
+        "terminal cancellation must not be reported through a Rust panic"
+    );
+    Ok(())
+}
+
+fn expect_alt_screen_after_resize(
+    log: &Path,
+    program: &str,
+    args: &[String],
+    initial_expected: &str,
+    resized_expected: &str,
+    exit_keys: &str,
+) -> io::Result<()> {
+    let script = format!(
+        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 5 columns 100}}\nspawn {program} {args}\n{enter}{initial_expected}stty rows 24 columns 100 < $spawn_out(slave,name)\n{resized_expected}send -- {exit_keys}\n{cursor_default}{leave}{eof}set wait_result [wait]\nexit [lindex $wait_result 3]\n",
+        log = tcl_word(&path_arg(log)),
+        program = tcl_word(program),
+        args = args
+            .iter()
+            .map(|arg| tcl_word(arg))
+            .collect::<Vec<_>>()
+            .join(" "),
+        enter = expect_exact_script("\x1b[?1049h"),
+        initial_expected = expect_exact_script(initial_expected),
+        resized_expected = expect_exact_script(resized_expected),
+        exit_keys = tcl_string(exit_keys),
+        cursor_default = expect_exact_script("\x1b[0 q"),
+        leave = expect_exact_script("\x1b[?1049l"),
+        eof = expect_eof_script(),
+    );
+    let output = Command::new("expect").arg("-c").arg(script).output()?;
+    assert_success(output);
+    assert_alt_screen_log(log)?;
+    assert_screen_log_contains(log, resized_expected)?;
+    Ok(())
+}
+
+fn expect_diff_manual_edit_history(log: &Path, program: &str, args: &[String]) -> io::Result<()> {
+    let script = format!(
+        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 24 columns 100}}\nspawn {program} {args}\n{enter}send -- \"deiX\"\n{edited}send -- \"\\033\"\n{normal_cursor}send -- \"\\033\"\n{selection_redraw}send -- \"u\\023\"\n{cursor_default}{leave}{eof}set wait_result [wait]\nexit [lindex $wait_result 3]\n",
+        log = tcl_word(&path_arg(log)),
+        program = tcl_word(program),
+        args = args
+            .iter()
+            .map(|arg| tcl_word(arg))
+            .collect::<Vec<_>>()
+            .join(" "),
+        enter = expect_exact_script("\x1b[?1049h"),
+        edited = expect_exact_script("Xold"),
+        normal_cursor = expect_exact_script("\x1b[2 q"),
+        selection_redraw = expect_exact_script("\x1b[?25l"),
+        cursor_default = expect_exact_script("\x1b[0 q"),
+        leave = expect_exact_script("\x1b[?1049l"),
+        eof = expect_eof_script(),
+    );
+    let output = Command::new("expect").arg("-c").arg(script).output()?;
+    assert_success(output);
+    assert_alt_screen_log(log)?;
+    assert_screen_log_contains(log, "Xold")?;
+    Ok(())
+}
+
 fn expect_alt_screen_after_keys(
     log: &Path,
     program: &str,
@@ -801,15 +1150,21 @@ fn assert_success_ref(output: &Output) {
 
 fn assert_alt_screen_log(log: &Path) -> io::Result<()> {
     let log = fs::read(log)?;
-    assert!(
-        log.windows(b"\x1b[?1049h".len())
-            .any(|w| w == b"\x1b[?1049h")
-    );
-    assert!(
-        log.windows(b"\x1b[?1049l".len())
-            .any(|w| w == b"\x1b[?1049l")
-    );
+    let enter = find_sequence(&log, b"\x1b[?1049h", 0)
+        .expect("terminal log should enter the alternate screen");
+    let cursor_default = find_sequence(&log, b"\x1b[0 q", enter)
+        .expect("terminal log should restore the user's cursor shape");
+    find_sequence(&log, b"\x1b[?1049l", cursor_default)
+        .expect("terminal log should leave the alternate screen after restoring the cursor");
     Ok(())
+}
+
+fn find_sequence(bytes: &[u8], needle: &[u8], start: usize) -> Option<usize> {
+    bytes
+        .get(start..)?
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|index| start + index)
 }
 
 fn assert_screen_log_contains(log: &Path, expected: &str) -> io::Result<()> {
