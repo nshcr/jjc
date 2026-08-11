@@ -91,7 +91,7 @@ fn edit_tty_redraws_after_terminal_resize() -> io::Result<()> {
     let content = numbered_lines("line", 30);
     fs::write(&message, &content)?;
 
-    expect_alt_screen_after_resize(
+    expect_edit_alt_screen_after_resize(
         &log,
         jjc(),
         &[s("edit"), path_arg(&message)],
@@ -1003,7 +1003,7 @@ fn expect_alt_screen_cancel(
     Ok(())
 }
 
-fn expect_alt_screen_after_resize(
+fn expect_edit_alt_screen_after_resize(
     log: &Path,
     program: &str,
     args: &[String],
@@ -1011,8 +1011,10 @@ fn expect_alt_screen_after_resize(
     resized_expected: &str,
     exit_keys: &str,
 ) -> io::Result<()> {
+    // Drive keys through Crossterm before resizing so its lazy SIGWINCH handler is ready.
+    // Expect's stty resize wakes the child on macOS, but Ubuntu needs an explicit SIGWINCH.
     let script = format!(
-        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 5 columns 100}}\nspawn {program} {args}\n{enter}{initial_expected}stty rows 24 columns 100 < $spawn_out(slave,name)\n{resized_expected}send -- {exit_keys}\n{cursor_default}{leave}{eof}set wait_result [wait]\nexit [lindex $wait_result 3]\n",
+        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 5 columns 100}}\nspawn {program} {args}\n{enter}{initial_expected}send -- \"i\"\n{insert_cursor}send -- \"\\033\"\n{normal_cursor}stty rows 24 columns 100 < $spawn_out(slave,name)\nif {{$tcl_platform(os) eq \"Linux\"}} {{exec kill -WINCH [exp_pid] 2>@1}}\n{resized_expected}send -- {exit_keys}\n{cursor_default}{leave}{eof}set wait_result [wait]\nexit [lindex $wait_result 3]\n",
         log = tcl_word(&path_arg(log)),
         program = tcl_word(program),
         args = args
@@ -1022,6 +1024,8 @@ fn expect_alt_screen_after_resize(
             .join(" "),
         enter = expect_exact_script("\x1b[?1049h"),
         initial_expected = expect_exact_script(initial_expected),
+        insert_cursor = expect_exact_script("\x1b[6 q"),
+        normal_cursor = expect_exact_script("\x1b[2 q"),
         resized_expected = expect_exact_script(resized_expected),
         exit_keys = tcl_string(exit_keys),
         cursor_default = expect_exact_script("\x1b[0 q"),
