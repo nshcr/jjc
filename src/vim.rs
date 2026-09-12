@@ -80,7 +80,8 @@ impl Vim {
                     true
                 }
                 Pending::Operator(Operator::Change) if code == KeyCode::Char('c') => {
-                    self.delete_range(buffer, buffer.current_line_range(), true);
+                    self.yank_line(buffer);
+                    self.mutate(buffer, EditCommand::ChangeLine);
                     self.mode = VimMode::Insert;
                     true
                 }
@@ -265,7 +266,7 @@ impl Vim {
             KeyCode::Backspace => self.mutate(buffer, EditCommand::Backspace),
             KeyCode::Delete => self.mutate(buffer, EditCommand::DeleteChar),
             KeyCode::Left => buffer.apply(EditCommand::MoveLeft),
-            KeyCode::Right => buffer.apply(EditCommand::MoveRight),
+            KeyCode::Right => buffer.apply(EditCommand::MoveRightInsert),
             KeyCode::Up => buffer.apply(EditCommand::MoveUp),
             KeyCode::Down => buffer.apply(EditCommand::MoveDown),
             KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -442,7 +443,7 @@ impl Vim {
     }
 
     fn paste_after(&mut self, buffer: &mut TextBuffer) {
-        if self.clipboard.text.is_empty() {
+        if self.clipboard.text.is_empty() && !self.clipboard.linewise {
             return;
         }
         self.record(buffer);
@@ -455,7 +456,7 @@ impl Vim {
     }
 
     fn paste_before(&mut self, buffer: &mut TextBuffer) {
-        if self.clipboard.text.is_empty() {
+        if self.clipboard.text.is_empty() && !self.clipboard.linewise {
             return;
         }
         self.record(buffer);
@@ -612,6 +613,65 @@ fn bracket(c: char) -> Option<(char, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linewise_paste_preserves_crlf_empty_lines_and_content_cr() {
+        for (input, expected) in [
+            ("text\r\n", "text\r\ntext\r\n"),
+            ("\r\n", "\r\n\r\n"),
+            ("\n", "\n\n"),
+            ("text\r\r\n", "text\r\r\ntext\r\r\n"),
+        ] {
+            for paste in ['p', 'P'] {
+                let mut vim = Vim::new();
+                let mut buffer = TextBuffer::from_text(input);
+                for c in ['y', 'y', paste] {
+                    vim.handle_key(&mut buffer, key(c));
+                }
+                assert_eq!(buffer.to_text(), expected);
+                vim.handle_key(&mut buffer, key('u'));
+                assert_eq!(buffer.to_text(), input);
+                vim.handle_key(&mut buffer, ctrl('r'));
+                assert_eq!(buffer.to_text(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn change_line_keeps_its_ending_and_the_following_line() {
+        for input in ["one\r\ntwo\n", "one\ntwo\r\n"] {
+            let mut vim = Vim::new();
+            let mut buffer = TextBuffer::from_text(input);
+            for c in ['c', 'c', 'X'] {
+                vim.handle_key(&mut buffer, key(c));
+            }
+            vim.handle_key(&mut buffer, esc());
+            assert_eq!(buffer.to_text(), input.replacen("one", "X", 1));
+            vim.handle_key(&mut buffer, key('u'));
+            vim.handle_key(&mut buffer, key('u'));
+            assert_eq!(buffer.to_text(), input);
+        }
+    }
+
+    #[test]
+    fn insert_arrow_and_charwise_paste_stop_before_crlf() {
+        let mut vim = Vim::new();
+        let mut buffer = TextBuffer::from_text("ab\r\n");
+        vim.handle_key(&mut buffer, key('i'));
+        for _ in 0..4 {
+            vim.handle_key(
+                &mut buffer,
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            );
+        }
+        vim.handle_key(&mut buffer, key('!'));
+        vim.handle_key(&mut buffer, esc());
+        assert_eq!(buffer.to_text(), "ab!\r\n");
+        for c in ['0', 'y', '$', '$', 'p'] {
+            vim.handle_key(&mut buffer, key(c));
+        }
+        assert_eq!(buffer.to_text(), "ab!ab!\r\n");
+    }
 
     #[test]
     fn normal_moves_deletes_pastes_and_undoes() {

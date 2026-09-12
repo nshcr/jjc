@@ -164,6 +164,61 @@ fn jj_resolve_round_trips_line_endings_before_accepting_each_side() -> io::Resul
     Ok(())
 }
 
+#[test]
+fn jj_resolve_crlf_marker_label_append_preserves_each_side() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    // Keep the opening marker's CRLF intact when appending to its label with A.
+    // These sides mirror jj's mixed-CRLF/final-CR conflict-parser regression.
+    let base = &b"base\r\n"[..];
+    let left = &b"left\r\nmore\r"[..];
+    let right = &b"right\r\n"[..];
+    for (side, key, expected) in [
+        ("left", '1', left),
+        ("base", '2', base),
+        ("right", '3', right),
+    ] {
+        let repo = content_conflict_repo(&format!("crlf-label-append-{side}"), base, left, right)?;
+        assert_success(
+            jj(repo.path())
+                .env("JJC_KEYS", "A label<Esc>:wq<Enter><Enter>")
+                .args(merge_editor_config())
+                .args(["--config", "ui.conflict-marker-style=\"git\""])
+                .args(["resolve", "--tool", "jjc", "root:file.txt"])
+                .output()?,
+        );
+        let unresolved = jj(repo.path()).args(["resolve", "--list"]).output()?;
+        assert_success_ref(&unresolved);
+        assert!(String::from_utf8_lossy(&unresolved.stdout).contains("file.txt"));
+        let markers = fs::read(repo.path().join("file.txt"))?;
+        let opening = markers
+            .split_inclusive(|byte| *byte == b'\n')
+            .next()
+            .unwrap();
+        assert!(opening.starts_with(b"<<<<<<< "));
+        assert!(
+            opening.ends_with(b"\r\n"),
+            "appending a marker label must preserve its CRLF: {opening:?}"
+        );
+
+        assert_success(
+            jj(repo.path())
+                .env("JJC_KEYS", format!("{key}:wq<Enter>"))
+                .args(merge_editor_config())
+                .args(["resolve", "--tool", "jjc", "root:file.txt"])
+                .output()?,
+        );
+        assert_eq!(
+            fs::read(repo.path().join("file.txt"))?,
+            expected,
+            "accepting {side} after appending to a marker label changed its bytes"
+        );
+        assert_no_conflicts(repo.path())?;
+    }
+    Ok(())
+}
+
 struct TestRepo {
     root: PathBuf,
     repo: PathBuf,

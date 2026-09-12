@@ -214,6 +214,11 @@ The full gate is Linux/macOS-only and requires Rust 1.93.1, `jj 0.45.1`, and
 Expect. It rejects missing prerequisites and protocol-version drift instead of
 silently skipping integration coverage.
 
+Manual text editing preserves existing LF and CRLF line endings. Line-end
+motions and edits operate before the CRLF terminator; new lines inherit the
+local line ending. Mixed endings and a bare CR at EOF remain intact outside
+the edited text.
+
 ## Current limits
 
 - The external `jj` merge-tool protocol cannot currently express deletion as
@@ -224,9 +229,6 @@ silently skipping integration coverage.
 - Visual mode, cross-line motion ranges, broader text objects, macros,
   file/directory conflicts, symlink conflicts, multi-side conflict UI, and the
   actual agent runtime are not implemented yet.
-- Manual editing treats CR as a line character: appending at the end of a CRLF
-  line can insert text after its CR. Marker round trips and side selection are
-  byte-preserving, but CRLF-aware line-end editing remains planned.
 - Additional Tree-sitter languages require a grammar crate and registry entry.
 
 For design details and planned work, see the

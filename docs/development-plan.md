@@ -306,14 +306,27 @@ Upstream sources: [absorb selection](https://github.com/jj-vcs/jj/blob/v0.45.1/c
 [converge description editing](https://github.com/jj-vcs/jj/blob/v0.45.1/cli/src/commands/converge.rs#L421),
 and [CR preservation](https://github.com/jj-vcs/jj/blob/v0.45.1/lib/src/conflicts.rs#L858).
 
+### Follow-up: CRLF-aware manual editing
+
+The shared text buffer now separates editable line content from its CRLF
+terminator while retaining raw lines for diff and merge serialization. Line-end
+motions, insertion, deletion, replacement, splitting, joining, and linewise
+paste preserve existing line endings. New lines use the current line's ending,
+or the preceding line's ending at an unterminated EOF. A bare CR at EOF and
+additional content CR bytes remain content. Mixed files are not normalized.
+
+Vim `cc` changes the current line in place, insert-mode Right reaches the
+insertion point before the terminator, and linewise paste can copy empty
+lines. Unit regressions cover mixed endings, Unicode insertion boundaries,
+and undo/redo. Real PTY tests cover CRLF append/newline/save and cancellation.
+A real-jj marker test appends to the opening marker label with `A`, then
+reparses and selects each side while preserving CRLF and EOF bare-CR bytes.
+
 ### Later product work
 
 After Phase 5 closes, separately design and prioritize:
 
 - Visual mode and broader Vim compatibility.
-- CRLF-aware Vim line-end editing; line-end insertion currently treats the CR
-  as a content character. The byte-preservation tests above cover marker round
-  trips and side selection, not arbitrary manual edits.
 - Search and larger navigation surfaces.
 - More adaptive merge layouts.
 - Commit-description assistance built on explicit structured edits.

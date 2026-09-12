@@ -57,6 +57,56 @@ fn edit_tty_ctrl_c_discards_changes_and_restores_terminal() -> io::Result<()> {
 }
 
 #[test]
+fn edit_tty_crlf_append_and_newline_preserve_bytes_and_restore_terminal() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let message = root.join("message.txt");
+    let log = root.join("tty.log");
+    fs::write(&message, b"first\r\nsecond\r\n")?;
+
+    expect_alt_screen(
+        &log,
+        jjc(),
+        &[s("edit"), path_arg(&message)],
+        "A appended\rinserted\x13",
+    )?;
+
+    assert_eq!(
+        fs::read(&message)?,
+        b"first appended\r\ninserted\r\nsecond\r\n"
+    );
+    assert_alt_screen_log(&log)?;
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn edit_tty_crlf_cancel_preserves_input_and_restores_terminal() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let message = root.join("message.txt");
+    let log = root.join("tty.log");
+    let original = b"first\r\nsecond\r\n";
+    fs::write(&message, original)?;
+
+    expect_alt_screen_cancel(
+        &log,
+        jjc(),
+        &[s("edit"), path_arg(&message)],
+        "A appended\rinserted\x03",
+        "edit canceled",
+    )?;
+
+    assert_eq!(fs::read(&message)?, original);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn edit_tty_empty_description_requires_second_ctrl_s() -> io::Result<()> {
     if !expect_available() {
         return Ok(());

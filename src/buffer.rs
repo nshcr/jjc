@@ -4,6 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 pub struct TextBuffer {
     lines: Vec<String>,
     trailing_newline: bool,
+    default_crlf: bool,
     cursor_x: usize,
     cursor_y: usize,
 }
@@ -85,6 +86,9 @@ impl TextBuffer {
         Self {
             lines,
             trailing_newline,
+            default_crlf: content
+                .find('\n')
+                .is_some_and(|end| content[..end].ends_with('\r')),
             cursor_x: 0,
             cursor_y: 0,
         }
@@ -124,15 +128,7 @@ impl TextBuffer {
             EditCommand::MoveUp => self.move_up(),
             EditCommand::MoveDown => self.move_down(),
             EditCommand::InsertChar(c) => self.insert_char(c),
-            EditCommand::InsertText(text) => {
-                for c in text.chars() {
-                    if c == '\n' {
-                        self.insert_newline();
-                    } else {
-                        self.insert_char(c);
-                    }
-                }
-            }
+            EditCommand::InsertText(text) => self.insert_text(&text),
             EditCommand::InsertNewline => self.insert_newline(),
             EditCommand::OpenLineBelow => self.open_line_below(),
             EditCommand::OpenLineAbove => self.open_line_above(),
@@ -167,7 +163,32 @@ impl TextBuffer {
     }
 
     pub fn current_line(&self) -> &str {
-        &self.lines[self.cursor_y]
+        self.line_text(self.cursor_y)
+    }
+
+    // Keep raw lines for diff/merge serialization; editing excludes only the
+    // CR that is paired with a real LF. A bare CR at EOF remains editable data.
+    fn line_text(&self, index: usize) -> &str {
+        let line = &self.lines[index];
+        if self.line_has_crlf(index) {
+            &line[..line.len() - 1]
+        } else {
+            line
+        }
+    }
+
+    fn line_has_crlf(&self, index: usize) -> bool {
+        (index + 1 < self.lines.len() || self.trailing_newline) && self.lines[index].ends_with('\r')
+    }
+
+    fn preferred_crlf(&self) -> bool {
+        if self.cursor_y + 1 < self.lines.len() || self.trailing_newline {
+            self.line_has_crlf(self.cursor_y)
+        } else if self.cursor_y > 0 {
+            self.line_has_crlf(self.cursor_y - 1)
+        } else {
+            self.default_crlf
+        }
     }
 
     pub fn current_line_range(&self) -> BufferRange {
@@ -180,12 +201,12 @@ impl TextBuffer {
         BufferRange::Char {
             line: self.cursor_y,
             start: self.cursor_x,
-            end: self.lines[self.cursor_y].len(),
+            end: self.current_line().len(),
         }
     }
 
     pub fn range_to_word_forward(&self) -> BufferRange {
-        let line = &self.lines[self.cursor_y];
+        let line = self.current_line();
         BufferRange::Char {
             line: self.cursor_y,
             start: self.cursor_x,
@@ -194,7 +215,7 @@ impl TextBuffer {
     }
 
     pub fn range_char_forward(&self) -> BufferRange {
-        let line = &self.lines[self.cursor_y];
+        let line = self.current_line();
         BufferRange::Char {
             line: self.cursor_y,
             start: self.cursor_x,
@@ -203,7 +224,7 @@ impl TextBuffer {
     }
 
     pub fn range_to_column(&self, column: usize, inclusive: bool) -> BufferRange {
-        let line = &self.lines[self.cursor_y];
+        let line = self.current_line();
         let start = self.cursor_x.min(column);
         let mut end = self.cursor_x.max(column);
         if inclusive {
@@ -217,14 +238,11 @@ impl TextBuffer {
     }
 
     pub fn range_to_char_column(&self, column: usize, inclusive: bool) -> BufferRange {
-        self.range_to_column(
-            char_column_to_byte(&self.lines[self.cursor_y], column),
-            inclusive,
-        )
+        self.range_to_column(char_column_to_byte(self.current_line(), column), inclusive)
     }
 
     pub fn range_inner_word(&self) -> Option<BufferRange> {
-        let line = &self.lines[self.cursor_y];
+        let line = self.current_line();
         let (start, end) = word_span_at_or_after(line, self.cursor_x)?;
         Some(BufferRange::Char {
             line: self.cursor_y,
@@ -236,7 +254,7 @@ impl TextBuffer {
     pub fn range_text(&self, range: BufferRange) -> String {
         match range {
             BufferRange::Char { line, start, end } => self.lines[line][start..end].to_owned(),
-            BufferRange::Line { line } => self.lines[line].clone(),
+            BufferRange::Line { line } => self.line_text(line).to_owned(),
         }
     }
 
@@ -293,16 +311,16 @@ impl TextBuffer {
     }
 
     pub fn move_left(&mut self) {
-        self.cursor_x = prev_boundary(&self.lines[self.cursor_y], self.cursor_x);
+        self.cursor_x = prev_boundary(self.current_line(), self.cursor_x);
     }
 
     pub fn move_right(&mut self) {
-        let next = next_boundary(&self.lines[self.cursor_y], self.cursor_x);
-        self.cursor_x = next.min(last_char_boundary(&self.lines[self.cursor_y]));
+        let next = next_boundary(self.current_line(), self.cursor_x);
+        self.cursor_x = next.min(last_char_boundary(self.current_line()));
     }
 
     pub fn move_right_insert(&mut self) {
-        self.cursor_x = next_boundary(&self.lines[self.cursor_y], self.cursor_x);
+        self.cursor_x = next_boundary(self.current_line(), self.cursor_x);
     }
 
     pub fn move_line_start(&mut self) {
@@ -310,11 +328,12 @@ impl TextBuffer {
     }
 
     pub fn move_to_char_column(&mut self, column: usize) {
-        self.cursor_x = char_column_to_byte(&self.lines[self.cursor_y], column);
+        self.cursor_x = char_column_to_byte(self.current_line(), column);
     }
 
     pub fn move_first_nonblank(&mut self) {
-        self.cursor_x = self.lines[self.cursor_y]
+        self.cursor_x = self
+            .current_line()
             .grapheme_indices(true)
             .find(|(_, grapheme)| !grapheme_is_whitespace(grapheme))
             .map(|(index, _)| index)
@@ -322,11 +341,12 @@ impl TextBuffer {
     }
 
     pub fn move_line_end(&mut self) {
-        self.cursor_x = last_char_boundary(&self.lines[self.cursor_y]);
+        self.cursor_x = last_char_boundary(self.current_line());
     }
 
     pub fn move_last_nonblank(&mut self) {
-        self.cursor_x = self.lines[self.cursor_y]
+        self.cursor_x = self
+            .current_line()
             .grapheme_indices(true)
             .rev()
             .find(|(_, grapheme)| !grapheme_is_whitespace(grapheme))
@@ -355,7 +375,7 @@ impl TextBuffer {
     }
 
     pub fn move_word_forward(&mut self) {
-        if let Some(index) = next_word_start(&self.lines[self.cursor_y], self.cursor_x) {
+        if let Some(index) = next_word_start(self.current_line(), self.cursor_x) {
             self.cursor_x = index;
         } else if self.cursor_y + 1 < self.lines.len() {
             self.cursor_y += 1;
@@ -367,7 +387,7 @@ impl TextBuffer {
     }
 
     pub fn move_word_backward(&mut self) {
-        if let Some(index) = previous_word_start(&self.lines[self.cursor_y], self.cursor_x) {
+        if let Some(index) = previous_word_start(self.current_line(), self.cursor_x) {
             self.cursor_x = index;
         } else if self.cursor_y > 0 {
             self.cursor_y -= 1;
@@ -378,7 +398,7 @@ impl TextBuffer {
     }
 
     pub fn move_word_end(&mut self) {
-        if let Some(index) = next_word_end(&self.lines[self.cursor_y], self.cursor_x) {
+        if let Some(index) = next_word_end(self.current_line(), self.cursor_x) {
             self.cursor_x = index;
         } else if self.cursor_y + 1 < self.lines.len() {
             self.cursor_y += 1;
@@ -390,7 +410,7 @@ impl TextBuffer {
     }
 
     pub fn move_word_end_backward(&mut self) {
-        if let Some(index) = previous_word_end(&self.lines[self.cursor_y], self.cursor_x) {
+        if let Some(index) = previous_word_end(self.current_line(), self.cursor_x) {
             self.cursor_x = index;
         } else if self.cursor_y > 0 {
             self.cursor_y -= 1;
@@ -401,7 +421,7 @@ impl TextBuffer {
     }
 
     pub fn move_big_word_forward(&mut self) {
-        if let Some(index) = next_big_word_start(&self.lines[self.cursor_y], self.cursor_x) {
+        if let Some(index) = next_big_word_start(self.current_line(), self.cursor_x) {
             self.cursor_x = index;
         } else if self.cursor_y + 1 < self.lines.len() {
             self.cursor_y += 1;
@@ -413,7 +433,7 @@ impl TextBuffer {
     }
 
     pub fn move_big_word_backward(&mut self) {
-        if let Some(index) = previous_big_word_start(&self.lines[self.cursor_y], self.cursor_x) {
+        if let Some(index) = previous_big_word_start(self.current_line(), self.cursor_x) {
             self.cursor_x = index;
         } else if self.cursor_y > 0 {
             self.cursor_y -= 1;
@@ -424,7 +444,7 @@ impl TextBuffer {
     }
 
     pub fn move_big_word_end(&mut self) {
-        if let Some(index) = next_big_word_end(&self.lines[self.cursor_y], self.cursor_x) {
+        if let Some(index) = next_big_word_end(self.current_line(), self.cursor_x) {
             self.cursor_x = index;
         } else if self.cursor_y + 1 < self.lines.len() {
             self.cursor_y += 1;
@@ -436,7 +456,7 @@ impl TextBuffer {
     }
 
     pub fn move_big_word_end_backward(&mut self) {
-        if let Some(index) = previous_big_word_end(&self.lines[self.cursor_y], self.cursor_x) {
+        if let Some(index) = previous_big_word_end(self.current_line(), self.cursor_x) {
             self.cursor_x = index;
         } else if self.cursor_y > 0 {
             self.cursor_y -= 1;
@@ -449,90 +469,132 @@ impl TextBuffer {
     pub fn insert_char(&mut self, c: char) {
         self.lines[self.cursor_y].insert(self.cursor_x, c);
         self.cursor_x += c.len_utf8();
+        self.cursor_x = self.cursor_x.min(self.current_line().len());
+    }
+
+    pub fn insert_text(&mut self, text: &str) {
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\r' if chars.peek() == Some(&'\n') => {
+                    chars.next();
+                    self.insert_newline_with_ending(true);
+                }
+                '\n' => self.insert_newline(),
+                _ => self.insert_char(c),
+            }
+        }
     }
 
     pub fn insert_newline(&mut self) {
+        self.insert_newline_with_ending(self.preferred_crlf());
+    }
+
+    fn insert_newline_with_ending(&mut self, crlf: bool) {
         let tail = self.lines[self.cursor_y].split_off(self.cursor_x);
+        if crlf {
+            self.lines[self.cursor_y].push('\r');
+        }
         self.cursor_y += 1;
         self.cursor_x = 0;
         self.lines.insert(self.cursor_y, tail);
     }
 
     pub fn open_line_below(&mut self) {
-        self.cursor_y += 1;
-        self.cursor_x = 0;
-        self.lines.insert(self.cursor_y, String::new());
+        self.insert_line_below(String::new());
     }
 
     pub fn open_line_above(&mut self) {
-        self.cursor_x = 0;
-        self.lines.insert(self.cursor_y, String::new());
+        self.insert_line_above(String::new());
     }
 
     pub fn backspace(&mut self) {
         if self.cursor_x > 0 {
-            let previous = prev_boundary(&self.lines[self.cursor_y], self.cursor_x);
+            let previous = prev_boundary(self.current_line(), self.cursor_x);
             self.lines[self.cursor_y].drain(previous..self.cursor_x);
             self.cursor_x = previous;
         } else if self.cursor_y > 0 {
+            let previous_end = self.line_text(self.cursor_y - 1).len();
             let line = self.lines.remove(self.cursor_y);
             self.cursor_y -= 1;
-            self.cursor_x = self.lines[self.cursor_y].len();
+            self.lines[self.cursor_y].truncate(previous_end);
+            self.cursor_x = previous_end;
             self.lines[self.cursor_y].push_str(&line);
+            self.cursor_x = self.cursor_x.min(self.current_line().len());
         }
     }
 
     pub fn delete_char(&mut self) {
-        if self.cursor_x < self.lines[self.cursor_y].len() {
-            let end = next_boundary(&self.lines[self.cursor_y], self.cursor_x);
+        if self.cursor_x < self.current_line().len() {
+            let end = next_boundary(self.current_line(), self.cursor_x);
             self.lines[self.cursor_y].drain(self.cursor_x..end);
         }
     }
 
     pub fn delete_char_before(&mut self) {
         if self.cursor_x > 0 {
-            let previous = prev_boundary(&self.lines[self.cursor_y], self.cursor_x);
+            let previous = prev_boundary(self.current_line(), self.cursor_x);
             self.lines[self.cursor_y].drain(previous..self.cursor_x);
             self.cursor_x = previous;
         }
     }
 
     pub fn replace_char(&mut self, c: char) {
-        if self.cursor_x < self.lines[self.cursor_y].len() {
-            let end = next_boundary(&self.lines[self.cursor_y], self.cursor_x);
+        if self.cursor_x < self.current_line().len() {
+            let end = next_boundary(self.current_line(), self.cursor_x);
             self.lines[self.cursor_y].replace_range(self.cursor_x..end, &c.to_string());
         }
     }
 
     pub fn delete_line(&mut self) {
         if self.lines.len() == 1 {
-            self.lines[0].clear();
+            self.change_line();
         } else {
+            // Removing an unterminated last line also removes its separator.
+            // Only drop the CR belonging to that separator, not a content CR.
+            if self.cursor_y + 1 == self.lines.len()
+                && !self.trailing_newline
+                && self.line_has_crlf(self.cursor_y - 1)
+            {
+                self.lines[self.cursor_y - 1].pop();
+            }
             self.lines.remove(self.cursor_y);
             self.clamp_cursor();
         }
     }
 
     pub fn take_current_line(&mut self) -> String {
-        let line = self.lines[self.cursor_y].clone();
+        let line = self.current_line().to_owned();
         self.delete_line();
         line
     }
 
-    pub fn insert_line_below(&mut self, line: String) {
+    pub fn insert_line_below(&mut self, mut line: String) {
+        let crlf = self.preferred_crlf();
         let index = (self.cursor_y + 1).min(self.lines.len());
+        if crlf {
+            if index == self.lines.len() && !self.trailing_newline {
+                self.lines[self.cursor_y].push('\r');
+            } else {
+                line.push('\r');
+            }
+        }
         self.lines.insert(index, line);
         self.cursor_y = index;
         self.cursor_x = 0;
     }
 
-    pub fn insert_line_above(&mut self, line: String) {
+    pub fn insert_line_above(&mut self, mut line: String) {
+        if self.preferred_crlf() {
+            line.push('\r');
+        }
         self.lines.insert(self.cursor_y, line);
         self.cursor_x = 0;
     }
 
     pub fn delete_to_line_end(&mut self) {
-        self.lines[self.cursor_y].truncate(self.cursor_x);
+        let end = self.current_line().len();
+        self.lines[self.cursor_y].drain(self.cursor_x..end);
     }
 
     pub fn delete_to_line_start(&mut self) {
@@ -541,7 +603,8 @@ impl TextBuffer {
     }
 
     pub fn change_line(&mut self) {
-        self.lines[self.cursor_y].clear();
+        let end = self.current_line().len();
+        self.lines[self.cursor_y].drain(..end);
         self.cursor_x = 0;
     }
 
@@ -549,20 +612,27 @@ impl TextBuffer {
         if self.cursor_y + 1 >= self.lines.len() {
             return;
         }
-        let next = self.lines.remove(self.cursor_y + 1);
+        let end = self.current_line().len();
+        let next_crlf = self.line_has_crlf(self.cursor_y + 1);
+        let next = self.line_text(self.cursor_y + 1).trim_start().to_owned();
+        self.lines.remove(self.cursor_y + 1);
         let line = &mut self.lines[self.cursor_y];
+        line.truncate(end);
         if !line.is_empty() && !line.ends_with(char::is_whitespace) && !next.trim().is_empty() {
             line.push(' ');
         }
-        line.push_str(next.trim_start());
-        self.cursor_x = last_char_boundary(line);
+        line.push_str(&next);
+        if next_crlf {
+            line.push('\r');
+        }
+        self.move_line_end();
     }
 
     pub fn toggle_char_case(&mut self) {
-        if self.cursor_x >= self.lines[self.cursor_y].len() {
+        if self.cursor_x >= self.current_line().len() {
             return;
         }
-        let end = next_boundary(&self.lines[self.cursor_y], self.cursor_x);
+        let end = next_boundary(self.current_line(), self.cursor_x);
         let replacement = self.lines[self.cursor_y][self.cursor_x..end]
             .chars()
             .map(toggle_case)
@@ -588,8 +658,8 @@ impl TextBuffer {
 
     fn clamp_cursor(&mut self) {
         self.cursor_y = self.cursor_y.min(self.lines.len() - 1);
-        self.cursor_x = self.cursor_x.min(self.lines[self.cursor_y].len());
-        self.cursor_x = floor_boundary(&self.lines[self.cursor_y], self.cursor_x);
+        self.cursor_x = self.cursor_x.min(self.current_line().len());
+        self.cursor_x = floor_boundary(self.current_line(), self.cursor_x);
     }
 
     fn replace_range(&mut self, range: BufferRange, replacement: impl FnOnce(&str) -> String) {
@@ -598,8 +668,8 @@ impl TextBuffer {
                 let replacement = replacement(&self.lines[line][start..end]);
                 self.lines[line].replace_range(start..end, &replacement);
                 self.cursor_y = line;
-                self.cursor_x =
-                    floor_boundary(&self.lines[line], start.min(self.lines[line].len()));
+                self.cursor_x = start;
+                self.clamp_cursor();
             }
             BufferRange::Line { line } => {
                 self.lines[line] = replacement(&self.lines[line]);
@@ -854,9 +924,135 @@ mod tests {
 
     #[test]
     fn round_trips_final_newline() {
-        for content in ["", "a", "a\n", "a\n\n", "\n"] {
+        for content in [
+            "",
+            "a",
+            "a\n",
+            "a\n\n",
+            "\n",
+            "a\r\n",
+            "a\r\nb\nc\r",
+            "a\r\r\n",
+        ] {
             let buffer = TextBuffer::from_text(content);
             assert_eq!(buffer.to_text(), content);
+        }
+    }
+
+    #[test]
+    fn crlf_line_end_edits_preserve_terminators_and_content_cr() {
+        for (input, after_append, after_delete) in [
+            ("a\r\n", "a!\r\n", "a\r\n"),
+            ("a\r\r\n", "a\r!\r\n", "a\r\r\n"),
+            ("a\r", "a\r!", "a\r"),
+        ] {
+            let mut buffer = TextBuffer::from_text(input);
+            buffer.move_line_end();
+            buffer.move_right_insert();
+            buffer.insert_char('!');
+            assert_eq!(buffer.to_text(), after_append);
+            buffer.backspace();
+            assert_eq!(buffer.to_text(), after_delete);
+        }
+
+        let mut buffer = TextBuffer::from_text("e\u{301}中\r\n");
+        buffer.move_line_end();
+        buffer.delete_char();
+        assert_eq!(buffer.to_text(), "e\u{301}\r\n");
+        buffer.move_line_start();
+        buffer.replace_char('X');
+        assert_eq!(buffer.to_text(), "X\r\n");
+        buffer.delete_to_line_end();
+        assert_eq!(buffer.to_text(), "\r\n");
+        buffer.delete_char();
+        buffer.replace_char('Y');
+        assert_eq!(buffer.to_text(), "\r\n");
+    }
+
+    #[test]
+    fn splitting_and_backspacing_preserve_mixed_endings() {
+        for (input, split) in [
+            ("ab\r\ncd\n", "a\r\nb\r\ncd\n"),
+            ("ab\ncd\r\n", "a\nb\ncd\r\n"),
+            ("ab\r", "a\nb\r"),
+            ("ab\r\r\n", "a\r\nb\r\r\n"),
+        ] {
+            let mut buffer = TextBuffer::from_text(input);
+            buffer.move_right_insert();
+            buffer.insert_newline();
+            assert_eq!(buffer.to_text(), split);
+            buffer.backspace();
+            assert_eq!(buffer.to_text(), input);
+            assert_eq!(buffer.cursor_byte(), 1);
+        }
+        let mut buffer = TextBuffer::from_text("a\r\nb");
+        buffer.move_file_end();
+        buffer.move_right_insert();
+        buffer.insert_newline();
+        assert_eq!(buffer.to_text(), "a\r\nb\r\n");
+        buffer.insert_char('c');
+        assert_eq!(buffer.to_text(), "a\r\nb\r\nc");
+    }
+
+    #[test]
+    fn line_opening_and_paste_use_the_destination_ending() {
+        let mut buffer = TextBuffer::from_text("a\r\nb\nc\r");
+        buffer.open_line_below();
+        buffer.insert_char('x');
+        assert_eq!(buffer.to_text(), "a\r\nx\r\nb\nc\r");
+        buffer.move_down();
+        buffer.insert_line_above("y".to_owned());
+        assert_eq!(buffer.to_text(), "a\r\nx\r\ny\nb\nc\r");
+
+        let mut buffer = TextBuffer::from_text("a\r\nb\r");
+        buffer.move_file_end();
+        buffer.insert_line_below("pasted".to_owned());
+        assert_eq!(buffer.to_text(), "a\r\nb\r\r\npasted");
+        buffer.open_line_above();
+        assert_eq!(buffer.to_text(), "a\r\nb\r\r\n\r\npasted");
+    }
+
+    #[test]
+    fn line_deletion_and_join_remove_only_the_separator_cr() {
+        for (input, deleted, joined) in [
+            ("a\r\nb\r\n", "a\r\n", "a b\r\n"),
+            ("a\r\nb", "a", "a b"),
+            ("a\r\r\nb\r", "a\r", "a\rb\r"),
+            ("a\r\nb\n", "a\r\n", "a b\n"),
+            ("a\nb\r\n", "a\n", "a b\r\n"),
+            ("a\r\n\r\n", "a\r\n", "a\r\n"),
+        ] {
+            let mut buffer = TextBuffer::from_text(input);
+            buffer.move_file_end();
+            buffer.delete_line();
+            assert_eq!(buffer.to_text(), deleted);
+            let mut buffer = TextBuffer::from_text(input);
+            buffer.join_line_below();
+            assert_eq!(buffer.to_text(), joined);
+        }
+        let mut buffer = TextBuffer::from_text("a\r\n");
+        buffer.delete_line();
+        assert_eq!(buffer.to_text(), "\r\n");
+    }
+
+    #[test]
+    fn inserted_text_does_not_double_explicit_crlf() {
+        let mut buffer = TextBuffer::from_text("tail\r\n");
+        buffer.insert_text("one\r\ntwo\n");
+        assert_eq!(buffer.to_text(), "one\r\ntwo\r\ntail\r\n");
+        let mut buffer = TextBuffer::from_text("");
+        buffer.insert_text("one\r\ntwo\r");
+        assert_eq!(buffer.to_text(), "one\r\ntwo\r");
+    }
+
+    #[test]
+    fn backspace_keeps_the_insertion_point_when_graphemes_join() {
+        for ending in ["\n", "\r\n"] {
+            let mut buffer = TextBuffer::from_text(&format!("e{ending}\u{301}x"));
+            buffer.move_down();
+            buffer.backspace();
+            buffer.insert_char('!');
+            assert_eq!(buffer.to_text(), "e!\u{301}x");
         }
     }
 
