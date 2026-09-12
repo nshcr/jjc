@@ -591,6 +591,63 @@ fn merge_tty_empty_side_requires_second_ctrl_s() -> io::Result<()> {
 }
 
 #[test]
+fn jj_converge_uses_description_editor_tty_and_preserves_jj_text() -> io::Result<()> {
+    if !expect_available() || !jj_available() {
+        return Ok(());
+    }
+    let (root, repo, change) = divergent_description_repo("converge-save")?;
+    let log = root.join("tty.log");
+    // Clear the small conflicted-description fixture using the editor's line delete.
+    let keys = format!("{}iJJ: merged description  \x13", "dd".repeat(16));
+
+    expect_alt_screen_session(
+        &log,
+        "jj",
+        &jj_editor_args(&repo, ["converge", "-r", "divergent()"]),
+        &converge_description_prompt(),
+        &keys,
+        0,
+    )?;
+
+    assert_alt_screen_log(&log)?;
+    assert!(description_log(&repo, "divergent()", "commit_id")?.is_empty());
+    assert_eq!(
+        description_log(&repo, &change, "description")?,
+        b"JJ: merged description  \n"
+    );
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn jj_converge_tty_cancel_preserves_divergence_and_descriptions() -> io::Result<()> {
+    if !expect_available() || !jj_available() {
+        return Ok(());
+    }
+    let (root, repo, _) = divergent_description_repo("converge-cancel")?;
+    let log = root.join("tty.log");
+    let before = description_log(&repo, "divergent()", "commit_id ++ description")?;
+
+    expect_alt_screen_session(
+        &log,
+        "jj",
+        &jj_editor_args(&repo, ["converge", "-r", "divergent()"]),
+        &converge_description_prompt(),
+        "iUNSAVED\x03",
+        1,
+    )?;
+
+    assert_alt_screen_log(&log)?;
+    assert_eq!(
+        description_log(&repo, "divergent()", "commit_id ++ description")?,
+        before
+    );
+    assert!(fs::read_to_string(&log)?.contains("edit canceled"));
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn jj_diffedit_uses_diff_editor_tty() -> io::Result<()> {
     if !expect_available() || !jj_available() {
         return Ok(());
@@ -842,6 +899,50 @@ fn changed_repo(name: &str) -> io::Result<(PathBuf, PathBuf)> {
     Ok((root, repo))
 }
 
+fn divergent_description_repo(name: &str) -> io::Result<(PathBuf, PathBuf, String)> {
+    let root = temp_root()?;
+    let repo = init_repo(&root, name)?;
+    assert_success(
+        jj(&repo)
+            .args(["describe", "-m", "base description"])
+            .output()?,
+    );
+    let change = rev(&repo)?;
+    let operation = jj(&repo)
+        .args(["op", "log", "--no-graph", "-n", "1", "-T", "id"])
+        .output()?;
+    assert_success_ref(&operation);
+    let operation = String::from_utf8_lossy(&operation.stdout);
+    assert_success(
+        jj(&repo)
+            .args(["describe", "-m", "left description"])
+            .output()?,
+    );
+    assert_success(
+        jj(&repo)
+            .args([
+                "--at-op",
+                operation.trim(),
+                "describe",
+                "-m",
+                "right description",
+            ])
+            .output()?,
+    );
+    // Reading at the current operation reconciles the concurrent operations.
+    let divergent = description_log(&repo, "divergent()", "commit_id ++ \"\\n\"")?;
+    assert_eq!(String::from_utf8_lossy(&divergent).lines().count(), 2);
+    Ok((root, repo, change))
+}
+
+fn description_log(repo: &Path, revisions: &str, template: &str) -> io::Result<Vec<u8>> {
+    let output = jj(repo)
+        .args(["log", "--no-graph", "-r", revisions, "-T", template])
+        .output()?;
+    assert_success_ref(&output);
+    Ok(output.stdout)
+}
+
 fn compact_two_change_repo(name: &str) -> io::Result<(PathBuf, PathBuf)> {
     let root = temp_root()?;
     let repo = init_repo(&root, name)?;
@@ -924,6 +1025,25 @@ fn jj_args<const N: usize>(repo: &Path, tail: [&str; N]) -> Vec<String> {
     args
 }
 
+fn jj_editor_args<const N: usize>(repo: &Path, tail: [&str; N]) -> Vec<String> {
+    let mut args = vec![
+        s("--no-pager"),
+        s("-R"),
+        path_arg(repo),
+        s("--config"),
+        format!("ui.editor=[{},\"edit\"]", toml_string(jjc())),
+    ];
+    args.extend(tail.into_iter().map(s));
+    args
+}
+
+fn converge_description_prompt() -> String {
+    format!(
+        "{}send -- \"y\\r\"\n",
+        expect_exact_script("Do you want to merge them now?")
+    )
+}
+
 fn jj_merge_args<const N: usize>(repo: &Path, tail: [&str; N]) -> Vec<String> {
     let mut args = vec![
         s("--no-pager"),
@@ -947,8 +1067,19 @@ fn jj_merge_args<const N: usize>(repo: &Path, tail: [&str; N]) -> Vec<String> {
 }
 
 fn expect_alt_screen(log: &Path, program: &str, args: &[String], keys: &str) -> io::Result<()> {
+    expect_alt_screen_session(log, program, args, "", keys, 0)
+}
+
+fn expect_alt_screen_session(
+    log: &Path,
+    program: &str,
+    args: &[String],
+    prompt_script: &str,
+    keys: &str,
+    expected_exit: i32,
+) -> io::Result<()> {
     let script = format!(
-        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 24 columns 100}}\nspawn {program} {args}\n{enter}send -- {keys}\n{leave}{eof}set wait_result [wait]\nexit [lindex $wait_result 3]\n",
+        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 24 columns 100}}\nspawn {program} {args}\n{prompt_script}{enter}send -- {keys}\n{cursor_default}{leave}{eof}set wait_result [wait]\nif {{[llength $wait_result] != 4 || [lindex $wait_result 2] != 0 || [lindex $wait_result 3] != {expected_exit}}} {{\nputs stderr \"expected normal child exit {expected_exit}, got $wait_result\"\nexit 126\n}}\nexit 0\n",
         log = tcl_word(&path_arg(log)),
         program = tcl_word(program),
         args = args
@@ -958,6 +1089,7 @@ fn expect_alt_screen(log: &Path, program: &str, args: &[String], keys: &str) -> 
             .join(" "),
         enter = expect_exact_script("\x1b[?1049h"),
         keys = tcl_string(keys),
+        cursor_default = expect_exact_script("\x1b[0 q"),
         leave = expect_exact_script("\x1b[?1049l"),
         eof = expect_eof_script(),
     );

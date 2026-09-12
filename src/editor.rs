@@ -42,6 +42,7 @@ enum Mode {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum EditProfile {
     Description,
+    ConvergeDescription,
     Sparse,
     Generic,
 }
@@ -50,6 +51,7 @@ impl EditProfile {
     fn for_path(path: &std::path::Path) -> Self {
         match path.extension().and_then(|extension| extension.to_str()) {
             Some("jjdescription") => Self::Description,
+            Some("jj-converge-description") => Self::ConvergeDescription,
             Some("jjsparse") => Self::Sparse,
             _ => Self::Generic,
         }
@@ -57,6 +59,10 @@ impl EditProfile {
 
     fn dims_jj_instructions(self) -> bool {
         matches!(self, Self::Description | Self::Sparse)
+    }
+
+    fn confirms_empty_message(self) -> bool {
+        matches!(self, Self::Description | Self::ConvergeDescription)
     }
 }
 
@@ -317,7 +323,7 @@ impl Editor {
     }
 
     fn save(&mut self) -> io::Result<bool> {
-        if self.profile == EditProfile::Description
+        if self.profile.confirms_empty_message()
             && self.message_is_empty()
             && !self.pending_empty_save
         {
@@ -334,7 +340,8 @@ impl Editor {
         self.buffer
             .lines()
             .iter()
-            .filter(|line| !line.starts_with("JJ:"))
+            // Converge reads its edited description verbatim, including JJ: lines.
+            .filter(|line| self.profile != EditProfile::Description || !line.starts_with("JJ:"))
             .all(|line| line.trim().is_empty())
     }
 }
@@ -433,6 +440,50 @@ mod tests {
     }
 
     #[test]
+    fn converge_empty_description_requires_confirmation_before_writing() {
+        let (root, path) = temp_file_with_suffix("draft\n", "jj-converge-description");
+        let mut editor = Editor::open(path.clone()).unwrap();
+        editor.handle_key(key('d')).unwrap();
+        editor.handle_key(key('d')).unwrap();
+
+        let save = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert!(!editor.handle_key(save).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "draft\n");
+        assert!(editor.status().to_string().contains("empty message"));
+        assert!(editor.handle_key(save).unwrap());
+        assert!(fs::read_to_string(path).unwrap().trim().is_empty());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn converge_jj_prefix_is_plain_nonempty_text_and_preserved_verbatim() {
+        let content = "JJ: ordinary description\r\n\t正文  \r\n";
+        let (root, path) = temp_file_with_suffix(content, "jj-converge-description");
+        let mut editor = Editor::open(path.clone()).unwrap();
+
+        let rendered = editor.render_text();
+        assert!(
+            !rendered[0].spans[0]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::DIM)
+        );
+        // A description consisting only of JJ: text is still nonempty.
+        editor.apply_suggestion(AgentSuggestion::replace_all("JJ: ordinary description\r\n"));
+        assert!(!editor.message_is_empty());
+        editor.apply_suggestion(AgentSuggestion::replace_all(content));
+        assert!(
+            editor
+                .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+                .unwrap()
+        );
+        assert_eq!(fs::read(path).unwrap(), content.as_bytes());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn sparse_empty_file_saves_without_commit_message_warning() {
         let (root, path) = temp_file_with_suffix("", "jjsparse");
         let mut editor = Editor::open(path).unwrap();
@@ -450,6 +501,10 @@ mod tests {
         assert_eq!(
             EditProfile::for_path(std::path::Path::new("editor-1.jjdescription")),
             EditProfile::Description
+        );
+        assert_eq!(
+            EditProfile::for_path(std::path::Path::new("editor-1.jj-converge-description")),
+            EditProfile::ConvergeDescription
         );
         assert_eq!(
             EditProfile::for_path(std::path::Path::new("editor-1.jjsparse")),
