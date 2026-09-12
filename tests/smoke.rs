@@ -349,6 +349,120 @@ fn jj_split_can_keep_only_the_current_hunk_with_jjc() -> io::Result<()> {
 }
 
 #[test]
+fn jj_absorb_uses_jjc_diff_editor() -> io::Result<()> {
+    check_absorb_selection("all", "w", true, true, true)
+}
+
+#[test]
+fn jj_absorb_keeps_unselected_hunks_in_the_source() -> io::Result<()> {
+    check_absorb_selection("partial", "ow", true, true, false)
+}
+
+#[test]
+fn jj_absorb_can_leave_all_changes_in_the_source() -> io::Result<()> {
+    check_absorb_selection("none", "dw", false, false, false)
+}
+
+#[test]
+fn jj_absorb_cancel_preserves_both_revisions() -> io::Result<()> {
+    check_absorb_selection("cancel", "dq", false, false, false)
+}
+
+fn check_absorb_selection(
+    name: &str,
+    keys: &str,
+    succeeds: bool,
+    first_selected: bool,
+    second_selected: bool,
+) -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo(&format!("absorb-{name}"))?;
+    let content = |first, second| {
+        format!(
+            "first = {first}\ncommon-1\ncommon-2\ncommon-3\ncommon-4\n\
+             common-5\ncommon-6\ncommon-7\ncommon-8\nsecond = {second}\n"
+        )
+    };
+    fs::write(repo.join("file.txt"), content("old", "old"))?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+    assert_success(jj(&repo).args(["new", "-m", "source"]).output()?);
+    let source = content("new", "new");
+    fs::write(repo.join("file.txt"), &source)?;
+    let before = jj(&repo)
+        .args([
+            "log",
+            "-r",
+            "@ | @-",
+            "--no-graph",
+            "-T",
+            "commit_id ++ '\n'",
+        ])
+        .output()?;
+    assert_success_ref(&before);
+
+    let mut command = jj(&repo);
+    command.env("JJC_KEYS", keys).args(diff_editor_config());
+    if name == "all" {
+        command.args(["absorb", "-i"]);
+    } else {
+        // --tool implies --interactive in jj.
+        command.args(["absorb", "--tool", "jjc"]);
+    }
+    let output = command.output()?;
+    if succeeds {
+        assert_success(output);
+    } else {
+        assert!(!output.status.success());
+        if name == "none" {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("No changes selected"));
+        } else {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("canceled"));
+        }
+    }
+
+    let parent = jj(&repo)
+        .args(["file", "show", "-r", "@-", "file.txt"])
+        .output()?;
+    assert_success_ref(&parent);
+    assert_eq!(
+        parent.stdout,
+        content(
+            if first_selected { "new" } else { "old" },
+            if second_selected { "new" } else { "old" },
+        )
+        .as_bytes()
+    );
+    let remaining = jj(&repo)
+        .args(["file", "show", "-r", "@", "file.txt"])
+        .output()?;
+    assert_success_ref(&remaining);
+    assert_eq!(remaining.stdout, source.as_bytes());
+    assert_eq!(fs::read(repo.join("file.txt"))?, source.as_bytes());
+
+    if !first_selected && !second_selected {
+        let after = jj(&repo)
+            .args([
+                "log",
+                "-r",
+                "@ | @-",
+                "--no-graph",
+                "-T",
+                "commit_id ++ '\n'",
+            ])
+            .output()?;
+        assert_success_ref(&after);
+        assert_eq!(
+            after.stdout, before.stdout,
+            "no selection must not rewrite commits"
+        );
+    }
+    fs::remove_dir_all(repo.parent().expect("test repository has a parent"))?;
+    Ok(())
+}
+
+#[test]
 fn jj_restore_can_restore_deleted_file_with_jjc() -> io::Result<()> {
     if !jj_available() {
         return Ok(());

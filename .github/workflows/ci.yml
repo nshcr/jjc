@@ -101,7 +101,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes expect
       - name: Install tested jj baseline
-        run: cargo install --locked jj-cli --version 0.44.0
+        run: cargo install --locked jj-cli --version 0.45.1
       - run: jj --version
       - name: Install jjc from the locked graph
         run: cargo install --locked --path . --root target/install-check --force
@@ -110,7 +110,7 @@ jobs:
       - name: Run real jj and TTY tests
         env:
           JJC_REQUIRE_INTEGRATION: "1"
-          JJC_EXPECT_JJ_VERSION: "0.44.0"
+          JJC_EXPECT_JJ_VERSION: "0.45.1"
         run: cargo test --locked --test smoke --test tty --test diff_tree_entries --test merge_markers
 
   latest-jj:

@@ -3,7 +3,7 @@
 This document is the canonical product roadmap for `jjc`. Detailed historical
 work and acceptance evidence live in the phase documents linked below.
 
-Status as of 2026-08-10:
+Status as of 2026-09-12:
 
 - Foundation milestones and Phase 2 are complete within their recorded scope.
 - Phase 3 features are implemented, but later review found integration and
@@ -12,6 +12,8 @@ Status as of 2026-08-10:
   boundaries. The hosted CI result remains pending external evidence.
 - [Phase 5](phase-5-terminal-ux-plan.md) is implemented and locally verified;
   its hosted CI result remains pending external evidence.
+- The current protocol baseline is `jj 0.45.1`; the upstream alignment below
+  supersedes historical phase versions without changing the three CLI routes.
 
 ## Product contract
 
@@ -181,14 +183,14 @@ The checkout already contains:
   empty-output confirmation, and partial resolution.
 - Grapheme-safe editing, terminal-cell horizontal viewports for text-editing
   surfaces, fingerprint-cached highlighting, and a `512 KiB` plain fallback.
-- Description, sparse, and generic `ui.editor` profiles.
-- Scripted real-`jj` smoke tests, eight tree-entry integrations, three dynamic
-  marker integrations, and a 29-test replayed PTY suite covering fixed and
-  resized terminals, real control keys, guarded saves, and cleanup on cancel.
+- Description, convergence-description, sparse, and generic `ui.editor` profiles.
+- Scripted real-`jj` smoke tests, tree-entry and dynamic-marker integrations,
+  and replayed PTY tests covering fixed and resized terminals, real control
+  keys, guarded saves, and cleanup on cancel.
 - A read-only `jjc doctor` whose generated config is exercised through all three
   routes and whose version status distinguishes the tested protocol from drift.
 - Rust 1.93.1 metadata and CI matrices for formatting, clippy, tests, pinned
-  `jj 0.44.0`, installation, and latest-`jj` advisory probing.
+  `jj 0.45.1`, installation, and latest-`jj` advisory probing.
 
 The Phase 5 local gate passed from the converged working state. After the branch
 is published, the hosted CI result remains separate external evidence.
@@ -258,11 +260,60 @@ lines inspectable without manual editing, and makes merge block choices safe,
 progressive, and batchable. It also moves the live protocol gate to `jj 0.44.0`
 while preserving Phase 4 as historical evidence.
 
+### Upstream alignment: jj 0.45.1
+
+The stable target is [jj 0.45.1](https://github.com/jj-vcs/jj/releases/tag/v0.45.1)
+(tag commit `7c41cdeb16b6b321c64e789a966b6adf723816a5`). The Rust baseline remains
+1.93.1. The local verification script, CI/release installs, doctor, and current
+support text name this same jj version. Development/prerelease versions must
+not be labelled as the tested release even when their numeric version matches.
+
+This alignment covers three upstream behaviors:
+
+- `jj absorb --interactive` and `--tool`, introduced in 0.44.0, use the existing
+  three-pane diff route. All, partial, empty, and canceled selection tests check
+  the destination and source trees. Empty selection is an upstream error that
+  preserves the commits, not a successful absorption.
+- `jj converge`, introduced in 0.45.0, opens `ui.editor` with a
+  `.jj-converge-description` file when the user chooses to edit descriptions
+  that cannot be merged automatically. Unlike `.jjdescription`, its content
+  is returned verbatim by jj: `JJ:` lines are ordinary text. The editor applies
+  empty-description confirmation without treating those lines as instructions.
+  Real terminal tests exercise description save and cancellation.
+- The 0.45.0 conflict-parser fix preserves a side ending in a bare carriage
+  return. Real-jj regressions check CRLF, bare CR, and missing-final-LF bytes
+  through marker round trips and side selection. jjc now removes exactly one
+  framing CR when a final, unterminated conflict uses CRLF markers, preserving
+  any CR that belongs to the selected content. Single, partial, and batch
+  choices share this decoding. Marker fixtures come from jj, whose line endings
+  encode whether a side had a terminating LF.
+
+The external-tool arguments and Git-marker configuration remain the same.
+No `jj_lib` dependency or unreleased main-branch protocol is introduced. Local
+results do not establish Linux/Windows behavior or hosted CI for this revision;
+those require the configured platform jobs to run on the same commit.
+
+Local validation on 2026-09-12 (macOS arm64, Rust 1.93.1, jj 0.45.1) passed
+`./scripts/verify.sh full`: 111 unit tests, 8 tree-entry tests, 4 marker tests,
+4 release-tag checks, 28 smoke tests, and 31 PTY tests. The 71 real-jj/filesystem/
+PTY integration tests also passed in strict mode without skipped prerequisites.
+The locked offline installation and installed `doctor` succeeded. Actionlint
+1.7.12 checked both modified workflows (external shell/Python linters disabled),
+and independent review found no remaining issue in this candidate. This is
+`verified-local`; hosted checks on the resulting commit remain pending.
+
+Upstream sources: [absorb selection](https://github.com/jj-vcs/jj/blob/v0.45.1/cli/src/commands/absorb.rs),
+[converge description editing](https://github.com/jj-vcs/jj/blob/v0.45.1/cli/src/commands/converge.rs#L421),
+and [CR preservation](https://github.com/jj-vcs/jj/blob/v0.45.1/lib/src/conflicts.rs#L858).
+
 ### Later product work
 
 After Phase 5 closes, separately design and prioritize:
 
 - Visual mode and broader Vim compatibility.
+- CRLF-aware Vim line-end editing; line-end insertion currently treats the CR
+  as a content character. The byte-preservation tests above cover marker round
+  trips and side selection, not arbitrary manual edits.
 - Search and larger navigation surfaces.
 - More adaptive merge layouts.
 - Commit-description assistance built on explicit structured edits.
@@ -280,7 +331,7 @@ limitations include deletion as the chosen result, non-normal tree entries,
 unresolved executable-bit conflicts, file/directory conflicts, symlink
 conflicts, and conflicts with more than two sides.
 
-An empty `$output` is not a deletion signal. On the current `jj 0.44.0`
+An empty `$output` is not a deletion signal. On the current `jj 0.45.1`
 protocol it can resolve to an empty regular file, so `jjc` requires explicit
 confirmation before returning empty output.
 

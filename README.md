@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/nshcr/jjc/actions/workflows/ci.yml/badge.svg)](https://github.com/nshcr/jjc/actions/workflows/ci.yml)
 [![Rust 1.93.1+](https://img.shields.io/badge/rust-1.93.1%2B-orange.svg)](https://www.rust-lang.org)
-[![Jujutsu](https://img.shields.io/badge/Jujutsu-0.44.0_baseline-blueviolet.svg)](https://docs.jj-vcs.dev/)
+[![Jujutsu](https://img.shields.io/badge/Jujutsu-0.45.1_baseline-blueviolet.svg)](https://docs.jj-vcs.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **One terminal-native editor for Jujutsu commit messages, interactive diffs, and merge conflicts.**
@@ -19,7 +19,7 @@ It is a single Rust binary with no GUI runtime. Text, diff, and merge views shar
 Tree-sitter syntax highlighting and Unicode-aware terminal rendering.
 
 > [!IMPORTANT]
-> `jjc` is experimental. The tested protocol baseline is `jj 0.44.0`; see
+> `jjc` is experimental. The tested protocol baseline is `jj 0.45.1`; see
 > [Current limits](#current-limits) before relying on it for unusual conflicts.
 
 ## Quick start
@@ -66,13 +66,18 @@ conflict-marker-style = "git"
 Try it in a repository:
 
 ```sh
-jj describe              # commit message editor
+jj describe             # commit message editor
 jj diffedit --tool jjc   # interactive diff editor
 jj resolve --tool jjc    # merge editor
+jj absorb --tool jjc     # choose changes to absorb into their ancestors
+jj converge             # edit descriptions when resolving divergence
 ```
 
 `jj restore -i`, `jj split`, and `jj squash -i` are also covered by the real
-`jj` integration suite.
+`jj` integration suite. `absorb` leaves unselected changes in the source
+revision; saving with nothing selected reports `No changes selected` without
+rewriting either revision. `converge` uses the text editor when descriptions
+cannot be merged automatically and you choose to edit them.
 
 ## Highlights
 
@@ -205,7 +210,7 @@ The current version and platform contract is in the
 ./scripts/verify.sh full
 ```
 
-The full gate is Linux/macOS-only and requires Rust 1.93.1, `jj 0.44.0`, and
+The full gate is Linux/macOS-only and requires Rust 1.93.1, `jj 0.45.1`, and
 Expect. It rejects missing prerequisites and protocol-version drift instead of
 silently skipping integration coverage.
 
@@ -219,13 +224,17 @@ silently skipping integration coverage.
 - Visual mode, cross-line motion ranges, broader text objects, macros,
   file/directory conflicts, symlink conflicts, multi-side conflict UI, and the
   actual agent runtime are not implemented yet.
+- Manual editing treats CR as a line character: appending at the end of a CRLF
+  line can insert text after its CR. Marker round trips and side selection are
+  byte-preserving, but CRLF-aware line-end editing remains planned.
 - Additional Tree-sitter languages require a grammar crate and registry entry.
 
 For design details and planned work, see the
 [development roadmap](docs/development-plan.md). The
-[Phase 5 plan](docs/phase-5-terminal-ux-plan.md) records the current terminal UX
-and local acceptance gates; [Phase 4](docs/phase-4-development-plan.md) remains
-the historical correctness baseline.
+[Phase 5 plan](docs/phase-5-terminal-ux-plan.md) records the terminal UX
+and its historical local acceptance gates;
+[Phase 4](docs/phase-4-development-plan.md) remains the historical correctness
+baseline.
 
 ## Development
 

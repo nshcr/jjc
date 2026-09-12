@@ -2,13 +2,14 @@ use std::env;
 use std::io;
 use std::process::Command;
 
-pub const TESTED_JJ_PROTOCOL_BASELINE: &str = "0.44.0";
+pub const TESTED_JJ_PROTOCOL_BASELINE: &str = "0.45.1";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum JjCompatibility {
     Tested,
     OlderUntested,
     NewerUntested,
+    DevelopmentUntested,
     Unknown,
 }
 
@@ -41,6 +42,11 @@ impl DoctorReport {
                             "warning jj: {version} is newer than tested protocol {TESTED_JJ_PROTOCOL_BASELINE}\n"
                         ));
                 }
+                JjCompatibility::DevelopmentUntested => {
+                    text.push_str(&format!(
+                        "warning jj: {version} is a development or prerelease build; tested protocol baseline is {TESTED_JJ_PROTOCOL_BASELINE}\n"
+                    ));
+                }
                 JjCompatibility::Unknown => {
                     text.push_str(&format!(
                             "warning jj: could not compare {version:?} with tested protocol {TESTED_JJ_PROTOCOL_BASELINE}\n"
@@ -64,13 +70,16 @@ impl DoctorReport {
     }
 
     fn compatibility(&self) -> JjCompatibility {
-        let Some(version) = self.jj_version.as_deref().and_then(version_triplet) else {
+        let Some(version) = self.jj_version.as_deref().and_then(parse_jj_version) else {
             return JjCompatibility::Unknown;
         };
-        let Some(baseline) = version_triplet(TESTED_JJ_PROTOCOL_BASELINE) else {
+        if version.is_prerelease {
+            return JjCompatibility::DevelopmentUntested;
+        }
+        let Some(baseline) = parse_jj_version(TESTED_JJ_PROTOCOL_BASELINE) else {
             return JjCompatibility::Unknown;
         };
-        match version.cmp(&baseline) {
+        match version.triplet.cmp(&baseline.triplet) {
             std::cmp::Ordering::Less => JjCompatibility::OlderUntested,
             std::cmp::Ordering::Equal => JjCompatibility::Tested,
             std::cmp::Ordering::Greater => JjCompatibility::NewerUntested,
@@ -139,19 +148,46 @@ fn toml_string(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-fn version_triplet(value: &str) -> Option<(u64, u64, u64)> {
+#[derive(Debug, Eq, PartialEq)]
+struct JjVersion {
+    triplet: (u64, u64, u64),
+    is_prerelease: bool,
+}
+
+fn parse_jj_version(value: &str) -> Option<JjVersion> {
     value.split_whitespace().find_map(|part| {
         let part = part.trim_start_matches('v');
-        let mut numbers = part.split('.');
+        let (version, metadata) = part
+            .split_once('+')
+            .map_or((part, None), |(version, metadata)| {
+                (version, Some(metadata))
+            });
+        let (version, prerelease) = version
+            .split_once('-')
+            .map_or((version, None), |(version, prerelease)| {
+                (version, Some(prerelease))
+            });
+        for suffix in [metadata, prerelease].into_iter().flatten() {
+            if !suffix.split('.').all(|identifier| {
+                !identifier.is_empty()
+                    && identifier
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '-')
+            }) {
+                return None;
+            }
+        }
+        let mut numbers = version.split('.');
         let major = numbers.next()?.parse().ok()?;
         let minor = numbers.next()?.parse().ok()?;
-        let patch = numbers
-            .next()?
-            .split(|character: char| !character.is_ascii_digit())
-            .next()?
-            .parse()
-            .ok()?;
-        Some((major, minor, patch))
+        let patch = numbers.next()?.parse().ok()?;
+        if numbers.next().is_some() {
+            return None;
+        }
+        Some(JjVersion {
+            triplet: (major, minor, patch),
+            is_prerelease: prerelease.is_some(),
+        })
     })
 }
 
@@ -201,7 +237,7 @@ mod tests {
         assert!(
             report
                 .text()
-                .contains("tested jj protocol baseline: 0.44.0")
+                .contains("tested jj protocol baseline: 0.45.1")
         );
         assert!(report.text().contains("recommended jj config:"));
     }
@@ -209,28 +245,84 @@ mod tests {
     #[test]
     fn reports_exact_and_drifted_jj_versions_truthfully() {
         let tested = DoctorReport {
-            jj_version: Some("jj 0.44.0".to_owned()),
+            jj_version: Some("jj 0.45.1".to_owned()),
             jj_error: None,
             jjc_program: "jjc".to_owned(),
         };
         let newer = DoctorReport {
-            jj_version: Some("jj 0.45.1".to_owned()),
+            jj_version: Some("jj 0.46.0".to_owned()),
             jj_error: None,
             jjc_program: "jjc".to_owned(),
         };
 
         assert_eq!(tested.compatibility(), JjCompatibility::Tested);
-        assert!(tested.text().contains("ok jj: jj 0.44.0 (tested protocol)"));
+        assert!(tested.text().contains("ok jj: jj 0.45.1 (tested protocol)"));
         assert_eq!(newer.compatibility(), JjCompatibility::NewerUntested);
         assert!(newer.text().contains("warning jj:"));
         assert!(!newer.text().contains("ok jj:"));
+
+        let older = DoctorReport {
+            jj_version: Some("jj 0.44.0".to_owned()),
+            ..tested
+        };
+        assert_eq!(older.compatibility(), JjCompatibility::OlderUntested);
+        assert!(
+            older
+                .text()
+                .contains("is older than tested protocol 0.45.1")
+        );
+    }
+
+    #[test]
+    fn development_and_prerelease_builds_are_never_reported_as_tested() {
+        for version in [
+            "jj 0.45.1-git",
+            "jj 0.45.1-rc.1",
+            "jj 0.45.1-git-a1b2c3d4",
+            "jj 0.45.1-rc.1+build.7",
+            "jj 0.46.0-dev",
+            "jj 0.44.0-git",
+        ] {
+            let report = DoctorReport {
+                jj_version: Some(version.to_owned()),
+                jj_error: None,
+                jjc_program: "jjc".to_owned(),
+            };
+
+            assert_eq!(report.compatibility(), JjCompatibility::DevelopmentUntested);
+            assert!(report.ok());
+            assert!(report.text().contains("development or prerelease build"));
+            assert!(!report.text().contains("ok jj:"));
+        }
     }
 
     #[test]
     fn parses_plain_and_decorated_jj_versions() {
-        assert_eq!(version_triplet("0.44.0"), Some((0, 44, 0)));
-        assert_eq!(version_triplet("jj 0.44.0"), Some((0, 44, 0)));
-        assert_eq!(version_triplet("jj 0.44.0-git"), Some((0, 44, 0)));
-        assert_eq!(version_triplet("unknown"), None);
+        for version in [
+            "0.45.1",
+            "jj 0.45.1",
+            "jj v0.45.1",
+            "jj 0.45.1 (a1b2c3d4)",
+            "jj 0.45.1+build.7",
+        ] {
+            assert_eq!(
+                parse_jj_version(version),
+                Some(JjVersion {
+                    triplet: (0, 45, 1),
+                    is_prerelease: false,
+                })
+            );
+        }
+        for version in [
+            "unknown",
+            "jj 0.45",
+            "jj 0.45.1.2",
+            "jj 0.45.1-",
+            "jj 0.45.1+",
+            "jj 0.45.1-git..1",
+            "jj 0.45.1unexpected",
+        ] {
+            assert_eq!(parse_jj_version(version), None);
+        }
     }
 }
