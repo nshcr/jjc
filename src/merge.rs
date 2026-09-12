@@ -761,7 +761,7 @@ fn accept_current_conflict_block(
     else {
         return AcceptBlockResult::NoBlock;
     };
-    let Some(replacement) = conflict_replacement(output.lines(), &block, side) else {
+    let Some(replacement) = conflict_replacement(output, &block, side) else {
         return AcceptBlockResult::SideUnavailable;
     };
     let start = block.start;
@@ -781,20 +781,32 @@ fn replace_conflict_block(output: &mut TextBuffer, block: &ConflictBlock, replac
 }
 
 fn conflict_replacement(
-    lines: &[String],
+    output: &TextBuffer,
     block: &ConflictBlock,
     side: Side,
 ) -> Option<Vec<String>> {
-    match side {
-        Side::Left => {
-            Some(lines[block.start + 1..block.base_marker.unwrap_or(block.separator)].to_vec())
-        }
+    let lines = output.lines();
+    let mut replacement = match side {
+        Side::Left => lines[block.start + 1..block.base_marker.unwrap_or(block.separator)].to_vec(),
         Side::Base => {
             let base_marker = block.base_marker?;
-            Some(lines[base_marker + 1..block.separator].to_vec())
+            lines[base_marker + 1..block.separator].to_vec()
         }
-        Side::Right => Some(lines[block.separator + 1..block.end].to_vec()),
+        Side::Right => lines[block.separator + 1..block.end].to_vec(),
+    };
+    // A jj end marker without LF means the last EOL on each side is framing.
+    // TextBuffer's trailing-newline bit already omits that LF on replacement.
+    // If the opening marker uses CRLF, also remove exactly its framing CR;
+    // any preceding CR belongs to the content (jj's Git-marker protocol).
+    if block.end + 1 == lines.len()
+        && !output.has_trailing_newline()
+        && lines[block.start].ends_with('\r')
+        && let Some(last) = replacement.last_mut()
+        && last.ends_with('\r')
+    {
+        last.pop();
     }
+    Some(replacement)
 }
 
 fn move_to_next_conflict(output: &mut TextBuffer, replaced_start: usize, marker_length: usize) {
@@ -817,7 +829,7 @@ fn accept_all_conflict_blocks(
     let blocks = conflict_blocks(output.lines(), marker_length);
     let replacements = blocks
         .iter()
-        .map(|block| conflict_replacement(output.lines(), block, side).ok_or(()))
+        .map(|block| conflict_replacement(output, block, side).ok_or(()))
         .collect::<Result<Vec<_>, _>>()?;
     let count = blocks.len();
     for (block, replacement) in blocks.iter().zip(replacements).rev() {
@@ -1042,6 +1054,75 @@ mod tests {
             );
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn side_choices_preserve_jj_end_of_file_framing() {
+        let cases = [
+            (
+                // Captured from jj 0.45.1 for mixed CRLF and a final bare CR.
+                "<<<<<<< left\r\nleft\r\nmore\r\r\n||||||| base\r\nbase\r\n\r\n=======\r\nright\r\n\r\n>>>>>>> right",
+                ["left\r\nmore\r", "base\r\n", "right\r\n"],
+            ),
+            (
+                // With LF framing the last CR belongs to the original side.
+                "<<<<<<< left\nleft\r\n||||||| base\nbase\n=======\nright\n>>>>>>> right",
+                ["left\r", "base", "right"],
+            ),
+            (
+                // A terminated end marker leaves each side's EOL intact.
+                "<<<<<<< left\r\nleft\r\n||||||| base\r\nbase\r\n=======\r\nright\r\n>>>>>>> right\r\n",
+                ["left\r\n", "base\r\n", "right\r\n"],
+            ),
+        ];
+        for (markers, expected_sides) in cases {
+            for (side, expected) in [Side::Left, Side::Base, Side::Right]
+                .into_iter()
+                .zip(expected_sides)
+            {
+                for prefix in ["", "context\r\n"] {
+                    let text = format!("{prefix}{markers}");
+                    let expected = format!("{prefix}{expected}");
+                    let mut current = TextBuffer::from_text(&text);
+                    assert!(matches!(
+                        accept_current_conflict_block(&mut current, side, 7),
+                        AcceptBlockResult::Accepted { .. }
+                    ));
+                    assert_eq!(current.to_text(), expected);
+
+                    let mut batch = TextBuffer::from_text(&text);
+                    assert_eq!(accept_all_conflict_blocks(&mut batch, side, 7), Ok(1));
+                    assert_eq!(batch.to_text(), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn final_crlf_block_decodes_before_resolving_an_earlier_block() {
+        let first = "<<<<<<< left\r\nleft-1\r\n||||||| base\r\nbase-1\r\n=======\r\nright-1\r\n>>>>>>> right\r\ncontext\r\n";
+        let last = "<<<<<<< left\r\nleft-2\r\r\n||||||| base\r\nbase-2\r\n=======\r\nright-2\r\n>>>>>>> right";
+        let mut output = TextBuffer::from_text(&format!("{first}{last}"));
+        let last_block = conflict_blocks(output.lines(), 7).pop().unwrap();
+        output.move_to_line(last_block.start);
+
+        assert!(matches!(
+            accept_current_conflict_block(&mut output, Side::Left, 7),
+            AcceptBlockResult::Accepted { .. }
+        ));
+        assert_eq!(output.to_text(), format!("{first}left-2\r"));
+        assert_eq!(
+            accept_all_conflict_blocks(&mut output, Side::Right, 7),
+            Ok(1)
+        );
+        assert_eq!(output.to_text(), "right-1\r\ncontext\r\nleft-2\r");
+
+        let mut output = TextBuffer::from_text(&format!("{first}{last}"));
+        assert_eq!(
+            accept_all_conflict_blocks(&mut output, Side::Left, 7),
+            Ok(2)
+        );
+        assert_eq!(output.to_text(), "left-1\r\ncontext\r\nleft-2\r");
     }
 
     #[test]

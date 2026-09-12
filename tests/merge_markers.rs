@@ -86,6 +86,84 @@ fn jj_resolve_preserves_literal_when_jj_lengthens_conflict_markers() -> io::Resu
     Ok(())
 }
 
+#[test]
+fn jj_resolve_round_trips_line_endings_before_accepting_each_side() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    // The first two cases mirror jj's CRLF conflict-parser regression inputs:
+    // https://github.com/jj-vcs/jj/blob/v0.45.1/lib/src/conflicts.rs
+    let cases = [
+        ("bare-cr", &b"base"[..], &b"left\r"[..], &b"right"[..]),
+        (
+            "mixed-crlf-final-cr",
+            &b"base\r\n"[..],
+            &b"left\r\nmore\r"[..],
+            &b"right\r\n"[..],
+        ),
+        (
+            "crlf",
+            &b"base\r\n"[..],
+            &b"left\r\n"[..],
+            &b"right\r\n"[..],
+        ),
+        ("no-final-lf", &b"base"[..], &b"left"[..], &b"right"[..]),
+    ];
+
+    for (name, base, left, right) in cases {
+        for (side, key, expected) in [
+            ("left", '1', left),
+            ("base", '2', base),
+            ("right", '3', right),
+        ] {
+            let repo = content_conflict_repo(&format!("{name}-{side}"), base, left, right)?;
+            let original_markers = fs::read(repo.path().join("file.txt"))?;
+
+            let unchanged = jj(repo.path())
+                .env("JJC_KEYS", ":wq<Enter><Enter>")
+                .args(merge_editor_config())
+                .args(["resolve", "--tool", "jjc", "root:file.txt"])
+                .output()?;
+            assert!(!unchanged.status.success());
+            assert!(
+                String::from_utf8_lossy(&unchanged.stderr)
+                    .contains("The output file is either unchanged or empty")
+            );
+            assert_eq!(fs::read(repo.path().join("file.txt"))?, original_markers);
+
+            // jj rejects an unchanged output file. Editing only the opening
+            // marker's label makes it parse and materialize the unchanged sides.
+            // Insert before the label so its original CRLF/LF ending is intact.
+            assert_success(
+                jj(repo.path())
+                    .env("JJC_KEYS", "wiX<Esc>:wq<Enter><Enter>")
+                    .args(merge_editor_config())
+                    .args(["resolve", "--tool", "jjc", "root:file.txt"])
+                    .output()?,
+            );
+            let unresolved = jj(repo.path()).args(["resolve", "--list"]).output()?;
+            assert_success_ref(&unresolved);
+            assert!(String::from_utf8_lossy(&unresolved.stdout).contains("file.txt"));
+
+            assert_success(
+                jj(repo.path())
+                    .env("JJC_KEYS", format!("{key}:wq<Enter>"))
+                    .args(merge_editor_config())
+                    .args(["resolve", "--tool", "jjc", "root:file.txt"])
+                    .output()?,
+            );
+
+            assert_eq!(
+                fs::read(repo.path().join("file.txt"))?,
+                expected,
+                "{name}: accepting {side} after a marker round trip changed its bytes"
+            );
+            assert_no_conflicts(repo.path())?;
+        }
+    }
+    Ok(())
+}
+
 struct TestRepo {
     root: PathBuf,
     repo: PathBuf,
@@ -104,46 +182,35 @@ impl Drop for TestRepo {
 }
 
 fn two_block_conflict_repo(name: &str) -> io::Result<TestRepo> {
-    let repo = init_repo(name)?;
-    fs::write(
-        repo.path().join("file.txt"),
-        conflict_content("base", "base"),
-    )?;
-    assert_success(jj(repo.path()).args(["describe", "-m", "base"]).output()?);
-
-    assert_success(jj(repo.path()).args(["new", "-m", "left"]).output()?);
-    fs::write(
-        repo.path().join("file.txt"),
-        conflict_content("left", "left"),
-    )?;
-    let left = rev(repo.path())?;
-
-    assert_success(
-        jj(repo.path())
-            .args(["new", "@-", "-m", "right"])
-            .output()?,
-    );
-    fs::write(
-        repo.path().join("file.txt"),
-        conflict_content("right", "right"),
-    )?;
-    let right = rev(repo.path())?;
-
-    assert_success(
-        jj(repo.path())
-            .args(["new", &left, &right, "-m", "merge"])
-            .output()?,
-    );
-    Ok(repo)
+    content_conflict_repo(
+        name,
+        conflict_content("base", "base").as_bytes(),
+        conflict_content("left", "left").as_bytes(),
+        conflict_content("right", "right").as_bytes(),
+    )
 }
 
 fn marker_literal_conflict_repo(name: &str) -> io::Result<TestRepo> {
+    content_conflict_repo(
+        name,
+        b"base\n",
+        b"left\n",
+        b"right-before\n>>>>>>>\nright-after\n",
+    )
+}
+
+fn content_conflict_repo(
+    name: &str,
+    base_content: &[u8],
+    left_content: &[u8],
+    right_content: &[u8],
+) -> io::Result<TestRepo> {
     let repo = init_repo(name)?;
-    fs::write(repo.path().join("file.txt"), "base\n")?;
+    fs::write(repo.path().join("file.txt"), base_content)?;
     assert_success(jj(repo.path()).args(["describe", "-m", "base"]).output()?);
 
     assert_success(jj(repo.path()).args(["new", "-m", "left"]).output()?);
-    fs::write(repo.path().join("file.txt"), "left\n")?;
+    fs::write(repo.path().join("file.txt"), left_content)?;
     let left = rev(repo.path())?;
 
     assert_success(
@@ -151,10 +218,7 @@ fn marker_literal_conflict_repo(name: &str) -> io::Result<TestRepo> {
             .args(["new", "@-", "-m", "right"])
             .output()?,
     );
-    fs::write(
-        repo.path().join("file.txt"),
-        "right-before\n>>>>>>>\nright-after\n",
-    )?;
+    fs::write(repo.path().join("file.txt"), right_content)?;
     let right = rev(repo.path())?;
 
     assert_success(

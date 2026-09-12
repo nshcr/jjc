@@ -94,6 +94,10 @@ impl TextBuffer {
         join_text(&self.lines, self.trailing_newline)
     }
 
+    pub fn has_trailing_newline(&self) -> bool {
+        self.trailing_newline
+    }
+
     pub fn set_text(&mut self, content: &str) {
         *self = Self::from_text(content);
     }
