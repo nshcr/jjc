@@ -631,7 +631,7 @@ fn merge_tty_empty_side_requires_second_ctrl_s() -> io::Result<()> {
             s("file.txt"),
         ],
         "1\x13",
-        "empty output creates an empty file; it cannot express deletion",
+        "jj resolve rejects empty output; it cannot express deletion",
         "\x13",
     )?;
 

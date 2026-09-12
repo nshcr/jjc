@@ -39,8 +39,8 @@ Invariants:
   change when the chosen side is unavailable anywhere.
 - A whole-file deletion side cannot bypass the empty-output confirmation,
   including through a batch command.
-- Empty merge output means an empty regular file on the external-tool protocol;
-  it is never presented as deletion support.
+- Empty merge output requires explicit confirmation in direct `jjc` use;
+  `jj resolve` rejects it and cannot interpret it as a deletion result.
 
 ## Shared terminal shell
 
@@ -100,11 +100,15 @@ base section is absent, the output stays unchanged. Pressing `Enter` saves only
 after all parsed blocks are resolved; explicit `Ctrl-S` / `:wq` retains the
 existing partial-resolution confirmation.
 
-`jj 0.44.0` accepts empty external-tool output as an empty regular file. `jjc`
-therefore requires a second save before returning zero bytes. Selecting a
-whole-file empty side is canonicalized to zero bytes before this check, so a
-preserved trailing newline cannot bypass the warning. The same rule applies to
-batch resolution.
+Correction (2026-09-12): the original statement that `jj 0.44.0` accepts empty
+external-tool output was incorrect. The external merge protocol rejects empty
+output; a missing output file also fails instead of deleting the conflicted
+path. This restriction remains verified with `jj 0.45.1`. `jjc` requires a
+second save before returning zero bytes for direct CLI use, and now warns that
+`jj resolve` will reject the result. Users can edit the content or cancel to
+keep the conflict. Selecting a whole-file empty side is canonicalized to zero
+bytes before this check, so a preserved trailing newline cannot bypass the
+warning. The same rule applies to batch resolution.
 
 ## Compatibility reporting
 

@@ -633,23 +633,110 @@ fn jj_resolve_delete_modify_can_keep_modified_side() -> io::Result<()> {
 }
 
 #[test]
-fn jj_resolve_delete_modify_delete_side_stays_protocol_limited() -> io::Result<()> {
+fn jj_resolve_rejects_confirmed_empty_file_side() -> io::Result<()> {
     if !jj_available() {
         return Ok(());
     }
-    let repo = delete_modify_repo("delete-modify-delete")?;
+    let repo = init_repo("resolve-empty-output")?;
+    fs::write(repo.join("file.txt"), "base\n")?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+    assert_success(jj(&repo).args(["new", "-m", "empty-file"]).output()?);
+    fs::write(repo.join("file.txt"), "")?;
+    let left = rev(&repo)?;
+    assert_success(jj(&repo).args(["new", "@-", "-m", "right"]).output()?);
+    fs::write(repo.join("file.txt"), "right\n")?;
+    let right = rev(&repo)?;
+    assert_success(
+        jj(&repo)
+            .args(["new", &left, &right, "-m", "merge"])
+            .output()?,
+    );
+    let original = fs::read(repo.join("file.txt"))?;
 
     let output = jj(&repo)
-        .env("JJC_KEYS", "1:wq<Enter><Esc>q")
-        .args(merge_editor_config())
+        .env("JJC_KEYS", "1<C-s><C-s>")
+        .args(marker_merge_editor_config())
         .args(["resolve", "--tool", "jjc", "file.txt"])
         .output()?;
     assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("The output file is either unchanged or empty after the editor quit"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let output = jj(&repo).args(["resolve", "--list"]).output()?;
     assert_success_ref(&output);
     assert!(String::from_utf8_lossy(&output.stdout).contains("file.txt"));
-    assert!(!fs::read(repo.join("file.txt"))?.is_empty());
+    assert_eq!(fs::read(repo.join("file.txt"))?, original);
+    Ok(())
+}
+
+#[test]
+fn jj_resolve_rejects_confirmed_delete_side_as_empty_output() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = delete_modify_repo("delete-modify-delete")?;
+    let original = fs::read(repo.join("file.txt"))?;
+
+    let output = jj(&repo)
+        .env("JJC_KEYS", "1<C-s><C-s>")
+        .args(marker_merge_editor_config())
+        .args(["resolve", "--tool", "jjc", "file.txt"])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("The output file is either unchanged or empty after the editor quit"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = jj(&repo).args(["resolve", "--list"]).output()?;
+    assert_success_ref(&output);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("file.txt"));
+    assert_eq!(fs::read(repo.join("file.txt"))?, original);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn jj_resolve_rejects_removing_the_tool_output_file() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = delete_modify_repo("delete-modify-missing-output")?;
+    let original = fs::read(repo.join("file.txt"))?;
+
+    // Probe the upstream protocol directly: even a successful tool cannot
+    // express deletion by removing its temporary output path.
+    let output = jj(&repo)
+        .args([
+            "--config",
+            "merge-tools.remove-output.program=\"rm\"",
+            "--config",
+            "merge-tools.remove-output.merge-args=[\"$output\"]",
+            "--config",
+            "merge-tools.remove-output.merge-tool-edits-conflict-markers=true",
+            "--config",
+            "merge-tools.remove-output.conflict-marker-style=\"git\"",
+            "resolve",
+            "--tool",
+            "remove-output",
+            "file.txt",
+        ])
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("I/O error"), "{stderr}");
+    assert!(stderr.contains("No such file or directory"), "{stderr}");
+
+    let output = jj(&repo).args(["resolve", "--list"]).output()?;
+    assert_success_ref(&output);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("file.txt"));
+    assert_eq!(fs::read(repo.join("file.txt"))?, original);
     Ok(())
 }
 
@@ -912,6 +999,17 @@ fn merge_editor_config() -> Vec<String> {
         "--config".into(),
         "merge-tools.jjc.merge-args=[\"merge\",\"$left\",\"$base\",\"$right\",\"$output\",\"--marker-length\",\"$marker_length\",\"--path\",\"$path\"]".into(),
     ]
+}
+
+fn marker_merge_editor_config() -> Vec<String> {
+    let mut config = merge_editor_config();
+    config.extend([
+        "--config".into(),
+        "merge-tools.jjc.merge-tool-edits-conflict-markers=true".into(),
+        "--config".into(),
+        "merge-tools.jjc.conflict-marker-style=\"git\"".into(),
+    ]);
+    config
 }
 
 fn jjc() -> &'static str {

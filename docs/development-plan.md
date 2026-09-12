@@ -322,6 +322,15 @@ and undo/redo. Real PTY tests cover CRLF append/newline/save and cancellation.
 A real-jj marker test appends to the opening marker label with `A`, then
 reparses and selects each side while preserving CRLF and EOF bare-CR bytes.
 
+The follow-up candidate, including the empty-output correction below, passed
+`./scripts/verify.sh full` on macOS arm64 with Rust 1.93.1 and jj 0.45.1:
+121 unit tests, 8 tree-entry tests, 5 marker tests, 4 release-tag checks,
+30 smoke tests, and 33 PTY tests. All 76 real-jj/filesystem/PTY tests also
+passed in strict mode. The locked offline installation and installed `doctor`
+passed, and independent review found no remaining issue after the empty-line
+paste and Unicode-join regressions were fixed. This is `verified-local`;
+Linux/Windows and hosted CI evidence remain separate.
+
 ### Later product work
 
 After Phase 5 closes, separately design and prioritize:
@@ -344,9 +353,19 @@ limitations include deletion as the chosen result, non-normal tree entries,
 unresolved executable-bit conflicts, file/directory conflicts, symlink
 conflicts, and conflicts with more than two sides.
 
-An empty `$output` is not a deletion signal. On the current `jj 0.45.1`
-protocol it can resolve to an empty regular file, so `jjc` requires explicit
-confirmation before returning empty output.
+An empty `$output` is not a deletion signal. The `jj 0.45.1` protocol rejects
+empty or unchanged output, and a missing output file produces an I/O error.
+Earlier roadmap text claiming that empty output resolves to an empty regular
+file was incorrect. Direct `jjc` use retains a second confirmation before
+writing an empty file, with a warning that `jj resolve` will reject it. Users
+can edit the content or cancel to keep the conflict.
+
+Real-jj regressions choose an empty-file side and a deletion side, perform
+both saves, and check the upstream rejection plus unchanged conflict bytes.
+A separate successful tool removes its temporary output file and verifies the
+I/O error and preserved conflict. These restrictions were rechecked against
+the stable release and upstream main `a4a61b3916f2a46eb3fb9f49b4e9021f26fdc893`
+on 2026-09-12. See the [external merge result checks](https://github.com/jj-vcs/jj/blob/v0.45.1/cli/src/merge_tools/external.rs#L283).
 
 Phase 4 does not promise local support for shapes that `jj` rejects before
 invoking `jjc` or that cannot be faithfully returned through one `$output`

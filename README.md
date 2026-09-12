@@ -222,8 +222,9 @@ the edited text.
 ## Current limits
 
 - The external `jj` merge-tool protocol cannot currently express deletion as
-  the merge result through `jjc`. Empty output therefore requires a second
-  confirmation and means “empty regular file,” not “delete this path.”
+  the merge result through `jjc`. `jj resolve` rejects empty output and fails
+  if the tool removes its output file. Direct `jjc` use can write an empty
+  file after a second confirmation, but `jj resolve` will reject that result.
 - `jj` rejects some non-normal-file and unresolved executable-bit conflicts
   before invoking an external merge tool.
 - Visual mode, cross-line motion ranges, broader text objects, macros,

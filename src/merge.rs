@@ -447,8 +447,8 @@ impl MergeApp {
             ),
             (MergeContent::Text { .. }, _) if self.pending_empty_save => ui::status_line(
                 "CONFIRM",
-                "empty output creates an empty file; it cannot express deletion",
-                "Ctrl-S save anyway  Ctrl-C cancel  ? help",
+                "jj resolve rejects empty output; it cannot express deletion",
+                "Esc then i edit  Ctrl-C cancel  Ctrl-S write empty output anyway  ? help",
             ),
             (MergeContent::Text { .. }, _) if self.pending_marker_save => ui::status_line(
                 "CONFIRM",
@@ -695,8 +695,9 @@ Finish
 
 Safety
   Unavailable base choices never replace the whole file.
-  Empty output needs confirmation because jj treats it as an empty file,
-  not as a request to delete the path.";
+  jj resolve rejects empty output and cannot use it to delete the path.
+  Press Esc then i to edit, or cancel to keep the conflict. Saving again
+  writes an empty file for direct jjc use; jj resolve rejects that result.";
 
 fn read_optional_text(path: &Path) -> io::Result<Option<String>> {
     match fs::read(path) {
@@ -1328,9 +1329,46 @@ mod tests {
 
         assert!(!app.save().unwrap());
         assert!(app.pending_empty_save);
+        let status = app.status().to_string();
+        assert!(status.contains("jj resolve rejects empty output"));
+        assert!(status.contains("Esc then i edit"));
+        assert!(status.contains("Ctrl-C cancel"));
+        assert!(status.contains("Ctrl-S write empty output anyway"));
         assert_eq!(fs::read_to_string(&output_path).unwrap(), "original\n");
         assert!(app.save().unwrap());
         assert_eq!(fs::read(&output_path).unwrap(), Vec::<u8>::new());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn empty_output_warning_allows_editing_after_command_save() {
+        let (root, output_path) = temp_output();
+        fs::write(&output_path, "original\n").unwrap();
+        let mut app = app(output_path.clone());
+
+        for key in [':', 'w', 'q'] {
+            assert!(
+                !app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))
+                    .unwrap()
+            );
+        }
+        assert!(
+            !app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap()
+        );
+        assert!(app.pending_empty_save);
+        for key in [KeyCode::Esc, KeyCode::Char('i'), KeyCode::Char('x')] {
+            assert!(
+                !app.handle_key(KeyEvent::new(key, KeyModifiers::NONE))
+                    .unwrap()
+            );
+        }
+        assert!(!app.pending_empty_save);
+        assert!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+                .unwrap()
+        );
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "x");
         fs::remove_dir_all(root).unwrap();
     }
 
