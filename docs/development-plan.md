@@ -331,6 +331,27 @@ passed, and independent review found no remaining issue after the empty-line
 paste and Unicode-join regressions were fixed. This is `verified-local`;
 Linux/Windows and hosted CI evidence remain separate.
 
+### Follow-up: conflict marker suffix boundary
+
+Conflict markers must be followed by ASCII whitespace or the end of the line.
+Previously, body text such as `>>>>>>>literal` could be treated as a closing
+marker, dropping that line and retaining the actual closing marker in a
+successfully resolved file. The parser now checks this suffix boundary while
+keeping the existing exact-marker-length policy.
+
+Unit tests cover all four marker characters, rejecting attached text and
+non-ASCII whitespace. A real `jj 0.45.1` regression checks byte-for-byte right
+side selection and the absence of remaining conflicts. Both regressions failed
+before the fix and passed afterward. This is a stable-protocol correctness fix;
+no unreleased upstream feature or baseline change is involved.
+
+The main-only candidate passed `./scripts/verify.sh full` on 2026-10-03
+(macOS arm64, Rust 1.93.1, jj 0.45.1): 122 unit tests, 8 tree-entry tests,
+6 marker tests, 4 release-tag checks, 30 smoke tests, and 33 PTY tests.
+All 77 filesystem/real-jj/PTY tests also passed in strict mode. Locked offline
+installation and installed doctor verification passed. This is `verified-local`;
+Linux/Windows and hosted CI evidence remain separate.
+
 ### Later product work
 
 After Phase 5 closes, separately design and prioritize:

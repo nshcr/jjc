@@ -87,6 +87,26 @@ fn jj_resolve_preserves_literal_when_jj_lengthens_conflict_markers() -> io::Resu
 }
 
 #[test]
+fn jj_resolve_preserves_right_side_literal_with_attached_marker_suffix() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let expected = b"right-before\n>>>>>>>literal\nright-after\n";
+    let repo = content_conflict_repo("attached-marker-suffix", b"base\n", b"left\n", expected)?;
+
+    let output = jj(repo.path())
+        .env("JJC_KEYS", "3:wq<Enter>")
+        .args(merge_editor_config())
+        .args(["resolve", "--tool", "jjc", "root:file.txt"])
+        .output()?;
+    assert_success(output);
+
+    assert_eq!(fs::read(repo.path().join("file.txt"))?, expected);
+    assert_no_conflicts(repo.path())?;
+    Ok(())
+}
+
+#[test]
 fn jj_resolve_round_trips_line_endings_before_accepting_each_side() -> io::Result<()> {
     if !jj_available() {
         return Ok(());

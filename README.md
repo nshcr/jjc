@@ -9,10 +9,10 @@
 
 `jjc` plugs into all three of `jj`'s editing surfaces:
 
-| `jj` setting | What `jjc` provides |
-| --- | --- |
-| `ui.editor` | A Vim-like commit message editor |
-| `ui.diff-editor` | Interactive hunk, line, file, and function selection |
+| `jj` setting      | What `jjc` provides                                       |
+| ----------------- | --------------------------------------------------------- |
+| `ui.editor`       | A Vim-like commit message editor                          |
+| `ui.diff-editor`  | Interactive hunk, line, file, and function selection      |
 | `ui.merge-editor` | Three-way text conflict editing and binary side selection |
 
 It is a single Rust binary with no GUI runtime. Text, diff, and merge views share
@@ -230,6 +230,8 @@ the edited text.
 - Visual mode, cross-line motion ranges, broader text objects, macros,
   file/directory conflicts, symlink conflicts, multi-side conflict UI, and the
   actual agent runtime are not implemented yet.
+- Diff editing uses jj's default directory invocation mode; configuring
+  `edit-invocation-mode = "file-by-file"` is not supported by `jjc`.
 - Additional Tree-sitter languages require a grammar crate and registry entry.
 
 For design details and planned work, see the

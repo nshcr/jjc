@@ -911,6 +911,10 @@ fn is_marker_line(line: &str, marker: char, marker_length: usize) -> bool {
             .take_while(|current| *current == marker)
             .count()
             == marker_length
+        && line
+            .chars()
+            .nth(marker_length)
+            .is_none_or(|next| next.is_ascii_whitespace())
 }
 
 #[cfg(test)]
@@ -1151,6 +1155,21 @@ mod tests {
         );
         assert!(conflict_blocks(&lines, 8).is_empty());
         assert!(conflict_blocks(&lines, 10).is_empty());
+    }
+
+    #[test]
+    fn marker_lines_require_ascii_whitespace_or_end_of_line() {
+        for marker in ['<', '|', '=', '>'] {
+            let prefix = marker.to_string().repeat(7);
+            for suffix in ["literal", "标签", "\u{00a0}label"] {
+                let line = format!("{prefix}{suffix}");
+                assert!(!is_marker_line(&line, marker, 7), "{line:?}");
+            }
+            for suffix in ["", " label", "\tlabel", "\r", "\n", "\u{000c}"] {
+                let line = format!("{prefix}{suffix}");
+                assert!(is_marker_line(&line, marker, 7), "{line:?}");
+            }
+        }
     }
 
     #[test]
