@@ -101,10 +101,25 @@ cannot be merged automatically and you choose to edit them.
 
 ```text
 jjc doctor
-jjc edit <file>
+jjc edit [--line <n>] <file>
 jjc diff <left> <right> <output>
 jjc merge <left> <base> <right> <output> --marker-length <n> --path <repo-path>
 ```
+
+`edit --line` starts at a 1-based line, clamped to the last line of the file.
+Without it, editing starts at line 1 as before.
+
+Upstream `jj` main adds `$path` and `$line` substitution for `ui.editor`. Once
+using a `jj` build that implements those variables, you can opt into:
+
+```toml
+[ui]
+editor = ["jjc", "edit", "--line", "$line", "--", "$path"]
+```
+
+Do **not** use that configuration with the tested `jj 0.45.1` baseline; keep
+`editor = ["jjc", "edit"]` there. This is preparation for an unreleased protocol,
+not a main-build support claim. See the [upstream audit](docs/upstream-alignment-2026-10-03.md).
 
 ## Key reference
 

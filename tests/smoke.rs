@@ -14,6 +14,106 @@ use support::jj_available;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
+fn edit_line_positions_scripted_edits_without_normalizing_endings() -> io::Result<()> {
+    let root = std::env::temp_dir().join(format!(
+        "jjc-edit-line-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root)?;
+    let path = root.join("a message.txt");
+    fs::write(&path, "first\r\n正文\r\nlast")?;
+    assert_success(
+        Command::new(jjc())
+            .env("JJC_KEYS", "iX<Esc>:wq<Enter>")
+            .args(["edit", "--line", "2", "--"])
+            .arg(&path)
+            .output()?,
+    );
+    assert_eq!(fs::read(&path)?, "first\r\nX正文\r\nlast".as_bytes());
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn jj_bulk_describe_preserves_commit_headers_and_descriptions() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("bulk-describe")?;
+    assert_success(
+        jj(&repo)
+            .args(["describe", "-m", "first description"])
+            .output()?,
+    );
+    assert_success(
+        jj(&repo)
+            .args(["new", "-m", "second description"])
+            .output()?,
+    );
+    let output = jj(&repo)
+        .env("JJC_KEYS", ":wq<Enter>")
+        .arg("--config")
+        .arg(format!("ui.editor=[{},\"edit\"]", toml_string(jjc())))
+        .args(["describe", "--editor", "-r", "@ | @-"])
+        .output()?;
+    assert_success(output);
+    for (revision, expected) in [("@-", "first description\n"), ("@", "second description\n")] {
+        let output = jj(&repo)
+            .args(["log", "-r", revision, "--no-graph", "-T", "description"])
+            .output()?;
+        assert_success_ref(&output);
+        assert_eq!(output.stdout, expected.as_bytes());
+    }
+    fs::remove_dir_all(repo.parent().unwrap())?;
+    Ok(())
+}
+
+#[test]
+fn jj_bulk_describe_cancel_preserves_both_commits() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("bulk-describe-cancel")?;
+    assert_success(
+        jj(&repo)
+            .args(["describe", "-m", "first description"])
+            .output()?,
+    );
+    assert_success(
+        jj(&repo)
+            .args(["new", "-m", "second description"])
+            .output()?,
+    );
+    let log_args = [
+        "log",
+        "-r",
+        "@ | @-",
+        "--no-graph",
+        "-T",
+        "commit_id ++ description",
+    ];
+    let before = jj(&repo).args(log_args).output()?;
+    assert_success_ref(&before);
+    let output = jj(&repo)
+        .env("JJC_KEYS", "iUNSAVED<Esc>:q!<Enter>")
+        .arg("--config")
+        .arg(format!("ui.editor=[{},\"edit\"]", toml_string(jjc())))
+        .args(["describe", "--editor", "-r", "@ | @-"])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("edit canceled"));
+    let after = jj(&repo).args(log_args).output()?;
+    assert_success_ref(&after);
+    assert_eq!(after.stdout, before.stdout);
+    fs::remove_dir_all(repo.parent().unwrap())?;
+    Ok(())
+}
+
+#[test]
 fn jj_describe_uses_jjc_editor() -> io::Result<()> {
     if !jj_available() {
         return Ok(());

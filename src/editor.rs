@@ -101,6 +101,12 @@ impl Editor {
         })
     }
 
+    pub fn open_at_line(path: PathBuf, line: std::num::NonZeroUsize) -> io::Result<Self> {
+        let mut editor = Self::open(path)?;
+        editor.buffer.move_to_line(line.get() - 1);
+        Ok(editor)
+    }
+
     pub fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
         loop {
             set_vim_cursor_style(terminal.backend_mut(), self.cursor_mode())?;
@@ -372,6 +378,48 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn opens_at_one_based_line_without_changing_content() {
+        for (content, requested, expected) in [
+            ("first\r\n正文\r\nlast", 2, 1),
+            ("first\nlast\n", usize::MAX, 1),
+            ("", 12, 0),
+        ] {
+            let (root, path) = temp_file(content);
+            let mut editor = Editor::open_at_line(
+                path.clone(),
+                std::num::NonZeroUsize::new(requested).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(editor.buffer.cursor_y(), expected);
+            assert_eq!(editor.buffer.to_text(), content);
+            assert!(editor.save().unwrap());
+            assert_eq!(fs::read_to_string(path).unwrap(), content);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn bulk_descriptions_preserve_headers_and_independently_edited_text() {
+        let content = "JJ: Enter or edit commit descriptions after the `JJ: describe` lines.\r\nJJ: describe abcdef123456 -------\r\nfirst\r\nJJ: describe 123456abcdef -------\r\nsecond\r\nJJ: Lines starting with JJ: will be removed.\r\n";
+        let (root, path) = temp_file_with_suffix(content, "jjdescription");
+        let mut editor = Editor::open(path.clone()).unwrap();
+        for line in [2, 4] {
+            editor.buffer.move_to_line(line);
+            editor.handle_key(key('I')).unwrap();
+            editor.handle_key(key('X')).unwrap();
+            editor.handle_key(esc()).unwrap();
+        }
+        assert!(editor.save().unwrap());
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            content
+                .replace("first\r\n", "Xfirst\r\n")
+                .replace("second\r\n", "Xsecond\r\n")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn q_bang_cancels_and_discards_buffer_changes() {

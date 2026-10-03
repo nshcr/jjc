@@ -34,6 +34,27 @@ fn tui_leaves_alternate_screen_on_exit() -> io::Result<()> {
 }
 
 #[test]
+fn edit_tty_line_option_positions_first_edit_and_restores_terminal() -> io::Result<()> {
+    if !expect_available() {
+        return Ok(());
+    }
+    let root = temp_root()?;
+    let message = root.join("a message.txt");
+    let log = root.join("tty.log");
+    fs::write(&message, "first\r\n正文\r\nlast")?;
+    expect_alt_screen(
+        &log,
+        jjc(),
+        &[s("edit"), s("--line"), s("2"), s("--"), path_arg(&message)],
+        "iX\x1b\x13",
+    )?;
+    assert_alt_screen_log(&log)?;
+    assert_eq!(fs::read(&message)?, "first\r\nX正文\r\nlast".as_bytes());
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn edit_tty_ctrl_c_discards_changes_and_restores_terminal() -> io::Result<()> {
     if !expect_available() {
         return Ok(());

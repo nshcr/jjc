@@ -6,14 +6,14 @@ terminal, filesystem, or conflict shape.
 
 ## Current compatibility matrix
 
-| Surface | Current contract | Evidence tier |
-| --- | --- | --- |
-| Rust | 1.93.1 is the minimum and blocking toolchain | local and CI quality gates |
-| `jj` | 0.45.1 is the blocking protocol baseline | real-`jj` smoke, tree, marker, and PTY tests |
-| newer `jj` | probed weekly without expanding the support claim | advisory CI only |
-| Linux | build, unit, real-`jj`, PTY, executable, and symlink behavior | Tier 1 |
-| macOS | build, unit, real-`jj`, PTY, executable, and symlink behavior | Tier 1 |
-| Windows | build, Clippy, portable tests, install, and binary startup | Tier 2 |
+| Surface    | Current contract                                              | Evidence tier                                |
+| ---------- | ------------------------------------------------------------- | -------------------------------------------- |
+| Rust       | 1.93.1 is the minimum and blocking toolchain                  | local and CI quality gates                   |
+| `jj`       | 0.45.1 is the blocking protocol baseline                      | real-`jj` smoke, tree, marker, and PTY tests |
+| newer `jj` | probed weekly without expanding the support claim             | advisory CI only                             |
+| Linux      | build, unit, real-`jj`, PTY, executable, and symlink behavior | Tier 1                                       |
+| macOS      | build, unit, real-`jj`, PTY, executable, and symlink behavior | Tier 1                                       |
+| Windows    | build, Clippy, portable tests, install, and binary startup    | Tier 2                                       |
 
 Tier 2 does not claim Windows ConPTY interaction or Unix filesystem semantics.
 Unsupported merge and tree-entry shapes remain listed in the README's current
@@ -41,6 +41,12 @@ must pass:
 2. the strict integration gate on Linux and macOS;
 3. installed `jjc doctor` verification;
 4. an explicitly labelled latest-version advisory probe when applicable.
+
+The [2026-10-03 upstream audit](upstream-alignment-2026-10-03.md) confirms that
+0.45.1 remains the latest stable release. Unreleased main's editor line/path
+variables and combined split-description session are tracked separately from
+the blocking baseline. The existing `latest-jj` job installs the latest
+published crate, not upstream main; it is not main-build runtime evidence.
 
 An advisory pass alone never promotes a new baseline. A failure is triaged as a
 local regression, upstream protocol change, runner/tooling issue, or unsupported

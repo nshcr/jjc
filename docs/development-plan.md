@@ -352,6 +352,20 @@ All 77 filesystem/real-jj/PTY tests also passed in strict mode. Locked offline
 installation and installed doctor verification passed. This is `verified-local`;
 Linux/Windows and hosted CI evidence remain separate.
 
+### Development branch: unreleased upstream alignment
+
+The `dev` branch tracks the [2026-10-03 upstream audit](upstream-alignment-2026-10-03.md)
+against main `69abfbedcc615bb562c31d488b98abb1ab854089`. This work is separate
+from stable-protocol fixes on `main`; the jj 0.45.1 and Rust 1.93.1 blocking
+baselines remain unchanged.
+
+`edit --line` prepares for main's optional `ui.editor` line/path substitution
+without changing doctor's stable config. Bulk-description tests preserve the
+headers used by main's combined split editor session, and native OS path
+arguments are checked for lossless CLI parsing. Main's jj binary has not been
+built or run; these are compatibility preparation and stable-jj regressions,
+not an unreleased-version support claim.
+
 ### Later product work
 
 After Phase 5 closes, separately design and prioritize:

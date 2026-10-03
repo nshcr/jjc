@@ -20,9 +20,9 @@ use crate::merge::MergeApp;
 pub fn run(command: Command) -> io::Result<()> {
     match command {
         Command::Doctor => doctor::run(),
-        Command::Edit { file } => {
+        Command::Edit { file, line } => {
             ensure_file(&file)?;
-            let mut editor = Editor::open(file)?;
+            let mut editor = Editor::open_at_line(file, line)?;
             if input::scripted() {
                 return editor.run_scripted();
             }
