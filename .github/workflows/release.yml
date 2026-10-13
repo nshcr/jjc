@@ -29,20 +29,33 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
-          toolchain: 1.93.1
+          toolchain: 1.97.1
           components: rustfmt, clippy
       - name: Install expect
         run: sudo apt-get update && sudo apt-get install --yes expect
       - name: Install tested jj baseline
-        run: cargo install --locked jj-cli --version 0.45.1
+        run: cargo install --locked jj-cli --version 0.46.0
       - name: Check advisories, licenses, bans, and sources
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
-          rust-version: "1.93.1"
+          rust-version: "1.97.1"
           command: check
           arguments: --all-features
       - name: Run the complete release gate
-        run: ./scripts/verify.sh full
+        shell: bash
+        run: |
+          mkdir -p target
+          ./scripts/verify.sh full 2>&1 | tee target/release-verification.log
+      - name: Retain release verification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-verification-${{ github.run_attempt }}
+          path: |
+            target/release-verification.log
+            target/protocol-evidence/*.log
+          if-no-files-found: warn
+          retention-days: 7
 
   build:
     name: Build ${{ matrix.target }}
@@ -83,7 +96,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
-          toolchain: 1.93.1
+          toolchain: 1.97.1
           targets: ${{ matrix.target }}
       - name: Verify tag matches Cargo package version
         if: github.event_name == 'push'
@@ -93,6 +106,12 @@ jobs:
           test "$GITHUB_REF_NAME" = "v$package_version"
       - name: Build release binary
         run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Check release binary startup (Unix)
+        if: runner.os != 'Windows'
+        run: target/${{ matrix.target }}/release/jjc --version
+      - name: Check release binary startup (Windows)
+        if: runner.os == 'Windows'
+        run: target/${{ matrix.target }}/release/jjc.exe --version
       - name: Package Unix binary
         if: matrix.archive == 'tar.gz'
         shell: bash

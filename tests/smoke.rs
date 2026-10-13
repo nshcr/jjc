@@ -14,6 +14,115 @@ use support::jj_available;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
+fn edit_starts_at_requested_line_and_clamps_at_eof() -> io::Result<()> {
+    let root = std::env::temp_dir().join(format!(
+        "jjc-edit-line-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root)?;
+    let file = root.join("with spaces.txt");
+    for (line, expected) in [
+        ("1", "Xfirst\nsecond\n"),
+        ("2", "first\nXsecond\n"),
+        ("999", "first\nXsecond\n"),
+    ] {
+        fs::write(&file, "first\nsecond\n")?;
+        assert_success(
+            Command::new(jjc())
+                .args(["edit", "--line", line, "--"])
+                .arg(&file)
+                .env("JJC_KEYS", "iX<C-s>")
+                .output()?,
+        );
+        assert_eq!(fs::read_to_string(&file)?, expected);
+    }
+    let output = Command::new(jjc())
+        .args(["edit", "--line", "0"])
+        .arg(&file)
+        .env("JJC_KEYS", "iUNSAVED<C-s>")
+        .output()?;
+    assert!(!output.status.success());
+    assert_eq!(fs::read_to_string(&file)?, "first\nXsecond\n");
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn jj_file_edit_updates_an_ancestor_and_rebases_the_working_copy() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("file-edit-ancestor")?;
+    fs::write(repo.join("with spaces.txt"), "original\n")?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+    assert_success(jj(&repo).args(["new", "-m", "child"]).output()?);
+    fs::write(repo.join("other.txt"), "child-only\n")?;
+    assert_success(
+        jj(&repo)
+            .args(text_editor_config())
+            .args(["file", "edit", "-r", "@-", "with spaces.txt"])
+            .env("JJC_KEYS", "ccJJ: edited ancestor<C-s>")
+            .output()?,
+    );
+    let output = jj(&repo)
+        .args(["file", "show", "-r", "@-", "with spaces.txt"])
+        .output()?;
+    assert_success_ref(&output);
+    assert_eq!(output.stdout, b"JJ: edited ancestor\n");
+    assert_eq!(fs::read(repo.join("with spaces.txt"))?, output.stdout);
+    assert_eq!(fs::read(repo.join("other.txt"))?, b"child-only\n");
+    Ok(())
+}
+
+#[test]
+fn jj_file_edit_creates_a_file_only_when_saved() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("file-edit-new")?;
+    let before = jj(&repo)
+        .args(["log", "-r", "@", "--no-graph", "-T", "commit_id"])
+        .output()?;
+    assert_success_ref(&before);
+    let output = jj(&repo)
+        .args(text_editor_config())
+        .args(["file", "edit", "new file.txt"])
+        .env("JJC_KEYS", "iUNSAVED<C-c>")
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("edit canceled"));
+    assert!(!repo.join("new file.txt").exists());
+    let after = jj(&repo)
+        .args(["log", "-r", "@", "--no-graph", "-T", "commit_id"])
+        .output()?;
+    assert_success_ref(&after);
+    assert_eq!(before.stdout, after.stdout);
+
+    assert_success(
+        jj(&repo)
+            .args(text_editor_config())
+            .args(["file", "edit", "new file.txt"])
+            .env("JJC_KEYS", "iCreated<C-s>")
+            .output()?,
+    );
+    assert_eq!(fs::read(repo.join("new file.txt"))?, b"Created");
+    // An ordinary file may be saved empty without description confirmation.
+    assert_success(
+        jj(&repo)
+            .args(text_editor_config())
+            .args(["file", "edit", "new file.txt"])
+            .env("JJC_KEYS", "dd<C-s>")
+            .output()?,
+    );
+    assert_eq!(fs::read(repo.join("new file.txt"))?, b"");
+    Ok(())
+}
+
+#[test]
 fn jj_describe_uses_jjc_editor() -> io::Result<()> {
     if !jj_available() {
         return Ok(());
@@ -987,6 +1096,16 @@ fn diff_editor_config() -> Vec<String> {
         format!("merge-tools.jjc.program={}", toml_string(jjc())),
         "--config".into(),
         "merge-tools.jjc.edit-args=[\"diff\",\"$left\",\"$right\",\"$output\"]".into(),
+    ]
+}
+
+fn text_editor_config() -> Vec<String> {
+    vec![
+        "--config".into(),
+        format!(
+            "ui.editor=[{},\"edit\",\"--line\",\"$line\",\"--\",\"$path\"]",
+            toml_string(jjc())
+        ),
     ]
 }
 

@@ -1,8 +1,8 @@
 # jjc
 
 [![CI](https://github.com/nshcr/jjc/actions/workflows/ci.yml/badge.svg)](https://github.com/nshcr/jjc/actions/workflows/ci.yml)
-[![Rust 1.93.1+](https://img.shields.io/badge/rust-1.93.1%2B-orange.svg)](https://www.rust-lang.org)
-[![Jujutsu](https://img.shields.io/badge/Jujutsu-0.45.1_baseline-blueviolet.svg)](https://docs.jj-vcs.dev/)
+[![Rust 1.97.1+](https://img.shields.io/badge/rust-1.97.1%2B-orange.svg)](https://www.rust-lang.org)
+[![Jujutsu](https://img.shields.io/badge/Jujutsu-0.46.0_baseline-blueviolet.svg)](https://docs.jj-vcs.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **One terminal-native editor for Jujutsu commit messages, interactive diffs, and merge conflicts.**
@@ -19,12 +19,12 @@ It is a single Rust binary with no GUI runtime. Text, diff, and merge views shar
 Tree-sitter syntax highlighting and Unicode-aware terminal rendering.
 
 > [!IMPORTANT]
-> `jjc` is experimental. The tested protocol baseline is `jj 0.45.1`; see
+> `jjc` is experimental. The tested protocol baseline is `jj 0.46.0`; see
 > [Current limits](#current-limits) before relying on it for unusual conflicts.
 
 ## Quick start
 
-Requires Rust 1.93.1 or newer and [`jj`](https://docs.jj-vcs.dev/latest/install-and-setup/).
+Requires Rust 1.97.1 or newer and [`jj`](https://docs.jj-vcs.dev/latest/install-and-setup/).
 
 ```sh
 cargo install --locked --git https://github.com/nshcr/jjc
@@ -41,7 +41,7 @@ config:
 
 ```toml
 [ui]
-editor = ["jjc", "edit"]
+editor = ["jjc", "edit", "--line", "$line", "--", "$path"]
 diff-editor = "jjc"
 merge-editor = "jjc"
 
@@ -71,6 +71,7 @@ jj diffedit --tool jjc   # interactive diff editor
 jj resolve --tool jjc    # merge editor
 jj absorb --tool jjc     # choose changes to absorb into their ancestors
 jj converge             # edit descriptions when resolving divergence
+jj file edit -r @- file  # edit a file in another revision
 ```
 
 `jj restore -i`, `jj split`, and `jj squash -i` are also covered by the real
@@ -78,6 +79,13 @@ jj converge             # edit descriptions when resolving divergence
 revision; saving with nothing selected reports `No changes selected` without
 rewriting either revision. `converge` uses the text editor when descriptions
 cannot be merged automatically and you choose to edit them.
+
+With jj 0.46.0, `split` edits both commit descriptions in a single text session;
+keep the `JJ: describe` separators intact. The recommended `ui.editor` config
+uses jj's `$path` and 1-based `$line` variables to open at the intended line.
+The previous `["jjc", "edit"]` configuration also works, starting at line 1.
+`file edit` can edit existing files or create new files; canceling leaves the
+revision unchanged. New files are created only on save.
 
 ## Highlights
 
@@ -101,7 +109,7 @@ cannot be merged automatically and you choose to edit them.
 
 ```text
 jjc doctor
-jjc edit <file>
+jjc edit <file> [--line <n>]
 jjc diff <left> <right> <output>
 jjc merge <left> <base> <right> <output> --marker-length <n> --path <repo-path>
 ```
@@ -210,9 +218,11 @@ The current version and platform contract is in the
 ./scripts/verify.sh full
 ```
 
-The full gate is Linux/macOS-only and requires Rust 1.93.1, `jj 0.45.1`, and
+The full gate is Linux/macOS-only and requires Rust 1.97.1, `jj 0.46.0`, and
 Expect. It rejects missing prerequisites and protocol-version drift instead of
 silently skipping integration coverage.
+jjc and jj 0.46.0 share the pinned Rust 1.97.1 toolchain across local checks,
+blocking CI, dependency policy, and release builds.
 
 Manual text editing preserves existing LF and CRLF line endings. Line-end
 motions and edits operate before the CRLF terminator; new lines inherit the

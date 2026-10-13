@@ -8,12 +8,16 @@ terminal, filesystem, or conflict shape.
 
 | Surface | Current contract | Evidence tier |
 | --- | --- | --- |
-| Rust | 1.93.1 is the minimum and blocking toolchain | local and CI quality gates |
-| `jj` | 0.45.1 is the blocking protocol baseline | real-`jj` smoke, tree, marker, and PTY tests |
+| Rust | 1.97.1 is the minimum and blocking toolchain | local and CI quality gates |
+| `jj` | 0.46.0 is the blocking protocol baseline | real-`jj` smoke, tree, marker, and PTY tests |
 | newer `jj` | probed weekly without expanding the support claim | advisory CI only |
 | Linux | build, unit, real-`jj`, PTY, executable, and symlink behavior | Tier 1 |
 | macOS | build, unit, real-`jj`, PTY, executable, and symlink behavior | Tier 1 |
 | Windows | build, Clippy, portable tests, install, and binary startup | Tier 2 |
+
+jjc and upstream jj 0.46.0 share Rust 1.97.1 for blocking checks and release
+builds. The latest-jj advisory installs stable Rust only for compiling a newer
+upstream binary; jjc is still tested with the pinned toolchain.
 
 Tier 2 does not claim Windows ConPTY interaction or Unix filesystem semantics.
 Unsupported merge and tree-entry shapes remain listed in the README's current
@@ -41,6 +45,16 @@ must pass:
 2. the strict integration gate on Linux and macOS;
 3. installed `jjc doctor` verification;
 4. an explicitly labelled latest-version advisory probe when applicable.
+
+Keep jjc's minimum Rust version and pinned toolchain aligned with the supported
+jj release's MSRV. Remove obsolete extra toolchain installs when both share a
+version. Historical acceptance records keep their original versions.
+
+Protocol CI and release verification retain test logs and save/cancel terminal
+transcripts as Actions artifacts for seven days. A manual Release workflow run
+verifies and builds all five platform archives without publishing a release;
+use it when changing toolchains or release infrastructure. Record the exact
+commit and run URLs in the acceptance report.
 
 An advisory pass alone never promotes a new baseline. A failure is triaged as a
 local regression, upstream protocol change, runner/tooling issue, or unsupported

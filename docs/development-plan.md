@@ -3,7 +3,7 @@
 This document is the canonical product roadmap for `jjc`. Detailed historical
 work and acceptance evidence live in the phase documents linked below.
 
-Status as of 2026-09-12:
+Status as of 2026-10-13:
 
 - Foundation milestones and Phase 2 are complete within their recorded scope.
 - Phase 3 features are implemented, but later review found integration and
@@ -12,8 +12,8 @@ Status as of 2026-09-12:
   boundaries. The hosted CI result remains pending external evidence.
 - [Phase 5](phase-5-terminal-ux-plan.md) is implemented and locally verified;
   its hosted CI result remains pending external evidence.
-- The current protocol baseline is `jj 0.45.1`; the upstream alignment below
-  supersedes historical phase versions without changing the three CLI routes.
+- The current protocol baseline is `jj 0.46.0`; the upstream alignments below
+  supersede historical phase versions without changing the three CLI routes.
 
 ## Product contract
 
@@ -36,7 +36,7 @@ a full IDE or an internal clone of `jj`.
 
 ```sh
 jjc doctor
-jjc edit <file>
+jjc edit <file> [--line <n>]
 jjc diff <left> <right> <output>
 jjc merge <left> <base> <right> <output> --marker-length <n> --path <repo-path>
 ```
@@ -189,8 +189,8 @@ The checkout already contains:
   keys, guarded saves, and cleanup on cancel.
 - A read-only `jjc doctor` whose generated config is exercised through all three
   routes and whose version status distinguishes the tested protocol from drift.
-- Rust 1.93.1 metadata and CI matrices for formatting, clippy, tests, pinned
-  `jj 0.45.1`, installation, and latest-`jj` advisory probing.
+- Rust 1.97.1 metadata and CI matrices for formatting, clippy, tests, pinned
+  `jj 0.46.0`, installation, and latest-`jj` advisory probing.
 
 The Phase 5 local gate passed from the converged working state. After the branch
 is published, the hosted CI result remains separate external evidence.
@@ -392,6 +392,63 @@ Phase 4 does not promise local support for shapes that `jj` rejects before
 invoking `jjc` or that cannot be faithfully returned through one `$output`
 file. Revisit those only after an upstream protocol change or a separately
 approved internal integration design.
+
+### Upstream alignment: jj 0.46.0
+
+The stable target is [jj 0.46.0](https://github.com/jj-vcs/jj/releases/tag/v0.46.0).
+Doctor, the strict local gate, blocking CI/release installs, and current support
+documentation now name this version. Historical acceptance records above retain
+their original versions. jjc and upstream jj now share Rust 1.97.1 as the
+minimum and blocking compiler for local checks, CI, and release builds. The advisory job uses stable Rust for the latest upstream binary.
+
+This alignment covers the changed text-editor contract:
+
+- `ui.editor` supports `$path` and 1-based `$line` substitution. `jjc edit`
+  accepts `--line`, rejects zero, and clamps a line past EOF to the last line.
+  Doctor recommends explicit substitutions with `--` before the file path.
+  The original `["jjc", "edit"]` config remains usable from line 1.
+- `jj split` now edits both descriptions in one `.jjdescription` session.
+  The `JJ: describe` separators remain intact for jj to parse. A real-terminal
+  test selects part of a diff, edits both descriptions, and checks both trees
+  and descriptions; cancellation at the description step preserves the original
+  commit and working-copy content.
+- `jj file edit` uses the text route for an existing or new file, including
+  files in ancestor revisions. A missing file with an existing parent opens as
+  an empty buffer and is created only on save. Missing parents, directories,
+  and dangling symlinks remain errors. Ordinary `JJ:` content and empty-file
+  saves retain generic text semantics. Integration tests check ancestor edits,
+  descendant rebasing, paths with spaces, creation, empty output, and cancel.
+
+The existing diff/merge argument configuration remains in use. Before this
+change, all 77 existing real-jj/filesystem/PTY tests passed against 0.46.0;
+new regression tests then demonstrated rejection of `--line` before the fix.
+Terminal transcripts for split and file-edit save/cancel scenarios are retained
+under `target/protocol-evidence/`.
+
+Initial validation on 2026-10-13 (macOS arm64, Rust 1.93.1, jj 0.46.0), before
+aligning the shared toolchain, passed
+`./scripts/verify.sh full`: 124 unit tests, 8 tree-entry tests, 6 marker tests,
+4 release-tag checks, 33 smoke/CLI tests, and 35 PTY tests. The 82 integration
+tests also passed with required prerequisites and the exact jj version enforced.
+Locked offline installation and the installed doctor succeeded. Actionlint
+1.7.12 checked both workflows with external shell/Python linters disabled.
+The complete local gate log is `target/jj-0.46.0-full.log`. These results are
+`verified-local`; hosted CI on the resulting revision remains pending.
+
+The final shared-toolchain candidate also passed `./scripts/verify.sh full` on
+2026-10-13 with Rust 1.97.1 and jj 0.46.0: the same 210 tests, including all 82
+strict integrations, locked offline installation, and installed doctor. The
+log is `target/jj-0.46.0-rust-1.97.1-full.log`. Both workflows passed Actionlint
+1.7.12. Blocking integration, latest-jj advisory, and release verification now
+retain logs and terminal transcripts as seven-day Actions artifacts. Release
+builds check binary startup on each native runner before packaging; a manual
+workflow run verifies all five archives without publishing. Hosted acceptance
+must identify the exact resulting commit and its CI/release workflow runs.
+
+Upstream sources: [text-editor substitutions and bulk descriptions](https://github.com/jj-vcs/jj/blob/v0.46.0/cli/src/description_util.rs),
+[split description editing](https://github.com/jj-vcs/jj/blob/v0.46.0/cli/src/commands/split.rs),
+[file editing](https://github.com/jj-vcs/jj/blob/v0.46.0/cli/src/commands/file/edit.rs),
+and [upstream Rust requirement](https://github.com/jj-vcs/jj/blob/v0.46.0/Cargo.toml).
 
 ## Validation policy
 

@@ -739,6 +739,131 @@ fn jj_restore_interactive_uses_diff_editor_tty() -> io::Result<()> {
 }
 
 #[test]
+fn jj_split_tty_edits_both_descriptions_in_one_session_or_cancels_atomically() -> io::Result<()> {
+    if !expect_available() || !jj_available() {
+        return Ok(());
+    }
+    for cancel in [false, true] {
+        let (root, repo) = compact_two_change_repo("split-descriptions")?;
+        let log = root.join("tty.log");
+        let before = description_log(&repo, "@", "commit_id ++ description")?;
+        let mut args = jj_args(&repo, []);
+        args.extend([
+            s("--config"),
+            format!(
+                "ui.editor=[{},\"edit\",\"--line\",\"$line\",\"--\",\"$path\"]",
+                toml_string(jjc())
+            ),
+            s("--config"),
+            // A minimal template makes cursor navigation independent of diff summaries.
+            s("templates.draft_commit_description='description'"),
+        ]);
+        args.extend([s("split"), s("--tool"), s("jjc")]);
+        let diff_session = format!(
+            "{}send -- \"dxw\"\n{}{}",
+            expect_exact_script("\x1b[?1049h"),
+            expect_exact_script("\x1b[0 q"),
+            expect_exact_script("\x1b[?1049l"),
+        );
+        // $line starts on the first description, below the bulk-edit header.
+        let input_script = if cancel {
+            format!("send -- {}\n", tcl_string("iUNSAVED\x03"))
+        } else {
+            format!(
+                "send -- {}\n{}send -- {}\n{}send -- {}\n",
+                tcl_string("ccselected"),
+                expect_exact_script("INSERT"),
+                tcl_string("\x1b"),
+                expect_exact_script("NORMAL"),
+                tcl_string("jjjjccremaining\x13"),
+            )
+        };
+        expect_alt_screen_session_script(
+            &log,
+            "jj",
+            &args,
+            &diff_session,
+            &input_script,
+            i32::from(cancel),
+        )?;
+        assert_alt_screen_log(&log)?;
+        let transcript = fs::read_to_string(&log)?;
+        // Exactly one diff session and one description session.
+        assert_eq!(transcript.matches("\x1b[?1049h").count(), 2);
+        if cancel {
+            assert_eq!(
+                description_log(&repo, "@", "commit_id ++ description")?,
+                before
+            );
+            assert!(transcript.contains("edit canceled"));
+        } else {
+            assert_eq!(description_log(&repo, "@-", "description")?, b"selected\n");
+            assert_eq!(description_log(&repo, "@", "description")?, b"remaining\n");
+            let selected = jj(&repo)
+                .args(["file", "show", "-r", "@-", "file.txt"])
+                .output()?;
+            assert_success_ref(&selected);
+            assert_eq!(selected.stdout, b"a\nnew1\nc\nold2\ne\n");
+        }
+        assert_eq!(fs::read(repo.join("file.txt"))?, b"a\nnew1\nc\nnew2\ne\n");
+        preserve_protocol_log(
+            &log,
+            if cancel {
+                "split-cancel.log"
+            } else {
+                "split-save.log"
+            },
+        )?;
+        fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn jj_file_edit_tty_creates_a_file_or_cancels_without_changing_the_revision() -> io::Result<()> {
+    if !expect_available() || !jj_available() {
+        return Ok(());
+    }
+    for cancel in [false, true] {
+        let root = temp_root()?;
+        let repo = init_repo(&root, "file-edit")?;
+        let log = root.join("tty.log");
+        let before = description_log(&repo, "@", "commit_id")?;
+        let file = repo.canonicalize()?.join("new file.txt");
+        expect_alt_screen_session(
+            &log,
+            "jj",
+            &jj_editor_args(&repo, ["file", "edit", &path_arg(&file)]),
+            "",
+            if cancel {
+                "iUNSAVED\x03"
+            } else {
+                "iCreated\x13"
+            },
+            i32::from(cancel),
+        )?;
+        assert_alt_screen_log(&log)?;
+        if cancel {
+            assert_eq!(description_log(&repo, "@", "commit_id")?, before);
+            assert!(!repo.join("new file.txt").exists());
+            assert!(fs::read_to_string(&log)?.contains("edit canceled"));
+        } else {
+            assert_eq!(fs::read(repo.join("new file.txt"))?, b"Created");
+        }
+        preserve_protocol_log(
+            &log,
+            if cancel {
+                "file-edit-cancel.log"
+            } else {
+                "file-edit-save.log"
+            },
+        )?;
+        fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+#[test]
 fn jj_split_uses_diff_editor_tty() -> io::Result<()> {
     if !expect_available() || !jj_available() {
         return Ok(());
@@ -939,6 +1064,13 @@ fn jjc() -> &'static str {
     env!("CARGO_BIN_EXE_jjc")
 }
 
+fn preserve_protocol_log(log: &Path, name: &str) -> io::Result<()> {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/protocol-evidence");
+    fs::create_dir_all(&directory)?;
+    fs::copy(log, directory.join(name))?;
+    Ok(())
+}
+
 fn changed_repo(name: &str) -> io::Result<(PathBuf, PathBuf)> {
     let root = temp_root()?;
     let repo = init_repo(&root, name)?;
@@ -1081,7 +1213,10 @@ fn jj_editor_args<const N: usize>(repo: &Path, tail: [&str; N]) -> Vec<String> {
         s("-R"),
         path_arg(repo),
         s("--config"),
-        format!("ui.editor=[{},\"edit\"]", toml_string(jjc())),
+        format!(
+            "ui.editor=[{},\"edit\",\"--line\",\"$line\",\"--\",\"$path\"]",
+            toml_string(jjc())
+        ),
     ];
     args.extend(tail.into_iter().map(s));
     args
@@ -1128,8 +1263,26 @@ fn expect_alt_screen_session(
     keys: &str,
     expected_exit: i32,
 ) -> io::Result<()> {
+    expect_alt_screen_session_script(
+        log,
+        program,
+        args,
+        prompt_script,
+        &format!("send -- {}\n", tcl_string(keys)),
+        expected_exit,
+    )
+}
+
+fn expect_alt_screen_session_script(
+    log: &Path,
+    program: &str,
+    args: &[String],
+    prompt_script: &str,
+    input_script: &str,
+    expected_exit: i32,
+) -> io::Result<()> {
     let script = format!(
-        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 24 columns 100}}\nspawn {program} {args}\n{prompt_script}{enter}send -- {keys}\n{cursor_default}{leave}{eof}set wait_result [wait]\nif {{[llength $wait_result] != 4 || [lindex $wait_result 2] != 0 || [lindex $wait_result 3] != {expected_exit}}} {{\nputs stderr \"expected normal child exit {expected_exit}, got $wait_result\"\nexit 126\n}}\nexit 0\n",
+        "log_file -noappend {log}\nset timeout 10\nset stty_init {{rows 24 columns 100}}\nspawn {program} {args}\n{prompt_script}{enter}{input_script}{cursor_default}{leave}{eof}set wait_result [wait]\nif {{[llength $wait_result] != 4 || [lindex $wait_result 2] != 0 || [lindex $wait_result 3] != {expected_exit}}} {{\nputs stderr \"expected normal child exit {expected_exit}, got $wait_result\"\nexit 126\n}}\nexit 0\n",
         log = tcl_word(&path_arg(log)),
         program = tcl_word(program),
         args = args
@@ -1138,7 +1291,6 @@ fn expect_alt_screen_session(
             .collect::<Vec<_>>()
             .join(" "),
         enter = expect_exact_script("\x1b[?1049h"),
-        keys = tcl_string(keys),
         cursor_default = expect_exact_script("\x1b[0 q"),
         leave = expect_exact_script("\x1b[?1049l"),
         eof = expect_eof_script(),

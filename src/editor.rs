@@ -1,5 +1,7 @@
 use std::fs;
 use std::io;
+use std::num::NonZeroUsize;
+use std::path::Path;
 use std::path::PathBuf;
 
 use crossterm::event::KeyCode;
@@ -83,11 +85,34 @@ pub struct Editor {
 
 impl Editor {
     pub fn open(path: PathBuf) -> io::Result<Self> {
-        let content = fs::read_to_string(&path)?;
+        Self::open_at_line(path, NonZeroUsize::MIN)
+    }
+
+    pub fn open_at_line(path: PathBuf, line: NonZeroUsize) -> io::Result<Self> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && fs::symlink_metadata(&path)
+                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+                    && parent.is_dir() =>
+            {
+                // jj file edit can pass a new path. Create it only on save,
+                // without treating a dangling symlink as a new regular file.
+                String::new()
+            }
+            Err(error) => return Err(error),
+        };
+        let mut buffer = TextBuffer::from_text(&content);
+        buffer.move_to_line(line.get() - 1);
         let profile = EditProfile::for_path(&path);
         Ok(Self {
             path,
-            buffer: TextBuffer::from_text(&content),
+            buffer,
             mode: Mode::Text,
             vim: Vim::new(),
             command: String::new(),
@@ -372,6 +397,27 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn opening_a_new_file_rejects_missing_parents_and_directories() {
+        let (root, path) = temp_file("original\n");
+        assert!(Editor::open(root.clone()).is_err());
+        assert!(Editor::open(root.join("missing/child.txt")).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), "original\n");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opening_a_dangling_symlink_does_not_create_its_target() {
+        let (root, _) = temp_file("original\n");
+        let target = root.join("absent.txt");
+        let link = root.join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(Editor::open(link).is_err());
+        assert!(!target.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn q_bang_cancels_and_discards_buffer_changes() {

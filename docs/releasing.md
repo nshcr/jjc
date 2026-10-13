@@ -28,6 +28,19 @@ git rev-parse HEAD
 Record the revision, Rust/`jj` versions, command results, and any unavailable
 platform. Required hosted CI must pass on that same revision before tagging.
 
+For a toolchain or release-workflow update, also run the archive build without
+tagging or publishing:
+
+```sh
+gh workflow run release.yml --ref main
+```
+
+Verify the run's `headSha` matches the candidate, inspect all five platform
+archives, and retain the CI/release run URLs. Manual runs skip attestation and
+publication; the `release-verification-*` artifact contains the full gate log
+and protocol terminal transcripts. Verification artifacts expire after seven
+days, so download them if longer retention is needed.
+
 ## 3. Tag and publish
 
 Create an annotated tag matching the Cargo version; use a signed tag when the

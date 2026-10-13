@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -15,7 +16,11 @@ pub enum Command {
     #[command(about = "Check local jjc usability and print recommended jj config")]
     Doctor,
     #[command(about = "Edit a single text file, used by jj ui.editor")]
-    Edit { file: PathBuf },
+    Edit {
+        file: PathBuf,
+        #[arg(long, default_value = "1", help = "Start on this 1-based line")]
+        line: NonZeroUsize,
+    },
     #[command(about = "Edit a jj diff using left/right/output directories")]
     Diff {
         left: PathBuf,
@@ -44,7 +49,10 @@ mod tests {
         let cli = Cli::try_parse_from(["jjc", "edit", "message.txt"]).unwrap();
 
         match cli.command {
-            Command::Edit { file } => assert_eq!(file, PathBuf::from("message.txt")),
+            Command::Edit { file, line } => {
+                assert_eq!(file, PathBuf::from("message.txt"));
+                assert_eq!(line.get(), 1);
+            }
             _ => panic!("expected edit command"),
         }
     }

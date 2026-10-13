@@ -35,22 +35,24 @@ run_full_gate() {
     require_command expect
 
     actual_rust=$(rustc --version | awk '{print $2}')
-    if [ "$actual_rust" != "1.93.1" ]; then
-        printf 'error: Rust 1.93.1 is required, found %s\n' "$actual_rust" >&2
+    if [ "$actual_rust" != "1.97.1" ]; then
+        printf 'error: Rust 1.97.1 is required, found %s\n' "$actual_rust" >&2
         exit 2
     fi
 
     actual_jj=$(jj --version)
-    if [ "$actual_jj" != "jj 0.45.1" ]; then
-        printf 'error: jj 0.45.1 is required, found %s\n' "$actual_jj" >&2
+    if [ "$actual_jj" != "jj 0.46.0" ]; then
+        printf 'error: jj 0.46.0 is required, found %s\n' "$actual_jj" >&2
         exit 2
     fi
+
+    printf 'Protocol gate: Rust %s, %s\n' "$actual_rust" "$actual_jj"
 
     run_fast_gate
 
     JJ_CONFIG= \
         JJC_REQUIRE_INTEGRATION=1 \
-        JJC_EXPECT_JJ_VERSION=0.45.1 \
+        JJC_EXPECT_JJ_VERSION=0.46.0 \
         cargo test --locked \
         --test smoke --test tty --test diff_tree_entries --test merge_markers
 

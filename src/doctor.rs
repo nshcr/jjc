@@ -2,7 +2,7 @@ use std::env;
 use std::io;
 use std::process::Command;
 
-pub const TESTED_JJ_PROTOCOL_BASELINE: &str = "0.45.1";
+pub const TESTED_JJ_PROTOCOL_BASELINE: &str = "0.46.0";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum JjCompatibility {
@@ -130,7 +130,7 @@ fn recommended_config(program: &str) -> String {
     let program = toml_string(program);
     format!(
         "[ui]\n\
-         editor = [{program}, \"edit\"]\n\
+         editor = [{program}, \"edit\", \"--line\", \"$line\", \"--\", \"$path\"]\n\
          diff-editor = \"jjc\"\n\
          merge-editor = \"jjc\"\n\
          \n\
@@ -199,7 +199,9 @@ mod tests {
     fn recommended_config_escapes_program_path() {
         let config = recommended_config(r#"/tmp/a "quoted" path/jjc"#);
 
-        assert!(config.contains(r#"editor = ["/tmp/a \"quoted\" path/jjc", "edit"]"#));
+        assert!(config.contains(
+            r#"editor = ["/tmp/a \"quoted\" path/jjc", "edit", "--line", "$line", "--", "$path"]"#
+        ));
         assert!(config.contains(r#"program = "/tmp/a \"quoted\" path/jjc""#));
     }
 
@@ -212,6 +214,10 @@ mod tests {
 
         assert_eq!(ui["editor"][0].as_str(), Some(program));
         assert_eq!(ui["editor"][1].as_str(), Some("edit"));
+        assert_eq!(ui["editor"][2].as_str(), Some("--line"));
+        assert_eq!(ui["editor"][3].as_str(), Some("$line"));
+        assert_eq!(ui["editor"][4].as_str(), Some("--"));
+        assert_eq!(ui["editor"][5].as_str(), Some("$path"));
         assert_eq!(ui["diff-editor"].as_str(), Some("jjc"));
         assert_eq!(ui["merge-editor"].as_str(), Some("jjc"));
         assert_eq!(tool["program"].as_str(), Some(program));
@@ -237,7 +243,7 @@ mod tests {
         assert!(
             report
                 .text()
-                .contains("tested jj protocol baseline: 0.45.1")
+                .contains("tested jj protocol baseline: 0.46.0")
         );
         assert!(report.text().contains("recommended jj config:"));
     }
@@ -245,43 +251,43 @@ mod tests {
     #[test]
     fn reports_exact_and_drifted_jj_versions_truthfully() {
         let tested = DoctorReport {
-            jj_version: Some("jj 0.45.1".to_owned()),
+            jj_version: Some("jj 0.46.0".to_owned()),
             jj_error: None,
             jjc_program: "jjc".to_owned(),
         };
         let newer = DoctorReport {
-            jj_version: Some("jj 0.46.0".to_owned()),
+            jj_version: Some("jj 0.47.0".to_owned()),
             jj_error: None,
             jjc_program: "jjc".to_owned(),
         };
 
         assert_eq!(tested.compatibility(), JjCompatibility::Tested);
-        assert!(tested.text().contains("ok jj: jj 0.45.1 (tested protocol)"));
+        assert!(tested.text().contains("ok jj: jj 0.46.0 (tested protocol)"));
         assert_eq!(newer.compatibility(), JjCompatibility::NewerUntested);
         assert!(newer.text().contains("warning jj:"));
         assert!(!newer.text().contains("ok jj:"));
 
         let older = DoctorReport {
-            jj_version: Some("jj 0.44.0".to_owned()),
+            jj_version: Some("jj 0.45.1".to_owned()),
             ..tested
         };
         assert_eq!(older.compatibility(), JjCompatibility::OlderUntested);
         assert!(
             older
                 .text()
-                .contains("is older than tested protocol 0.45.1")
+                .contains("is older than tested protocol 0.46.0")
         );
     }
 
     #[test]
     fn development_and_prerelease_builds_are_never_reported_as_tested() {
         for version in [
+            "jj 0.46.0-git",
+            "jj 0.46.0-rc.1",
+            "jj 0.46.0-git-a1b2c3d4",
+            "jj 0.46.0-rc.1+build.7",
+            "jj 0.47.0-dev",
             "jj 0.45.1-git",
-            "jj 0.45.1-rc.1",
-            "jj 0.45.1-git-a1b2c3d4",
-            "jj 0.45.1-rc.1+build.7",
-            "jj 0.46.0-dev",
-            "jj 0.44.0-git",
         ] {
             let report = DoctorReport {
                 jj_version: Some(version.to_owned()),
@@ -299,16 +305,16 @@ mod tests {
     #[test]
     fn parses_plain_and_decorated_jj_versions() {
         for version in [
-            "0.45.1",
-            "jj 0.45.1",
-            "jj v0.45.1",
-            "jj 0.45.1 (a1b2c3d4)",
-            "jj 0.45.1+build.7",
+            "0.46.0",
+            "jj 0.46.0",
+            "jj v0.46.0",
+            "jj 0.46.0 (a1b2c3d4)",
+            "jj 0.46.0+build.7",
         ] {
             assert_eq!(
                 parse_jj_version(version),
                 Some(JjVersion {
-                    triplet: (0, 45, 1),
+                    triplet: (0, 46, 0),
                     is_prerelease: false,
                 })
             );
@@ -316,11 +322,11 @@ mod tests {
         for version in [
             "unknown",
             "jj 0.45",
-            "jj 0.45.1.2",
-            "jj 0.45.1-",
-            "jj 0.45.1+",
-            "jj 0.45.1-git..1",
-            "jj 0.45.1unexpected",
+            "jj 0.46.0.2",
+            "jj 0.46.0-",
+            "jj 0.46.0+",
+            "jj 0.46.0-git..1",
+            "jj 0.46.0unexpected",
         ] {
             assert_eq!(parse_jj_version(version), None);
         }
