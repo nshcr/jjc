@@ -58,6 +58,93 @@ mod tests {
     }
 
     #[test]
+    fn parses_editor_line_and_explicit_path() {
+        let cli = Cli::try_parse_from([
+            "jjc",
+            "edit",
+            "--line",
+            "12",
+            "--",
+            "a path/message.jjdescription",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Edit { file, line } => {
+                assert_eq!(file, PathBuf::from("a path/message.jjdescription"));
+                assert_eq!(line.get(), 12);
+            }
+            _ => panic!("expected edit command"),
+        }
+        for line in ["0", "-1", "not-a-line"] {
+            assert!(Cli::try_parse_from(["jjc", "edit", "--line", line, "message.txt"]).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserves_non_utf8_tool_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let paths: Vec<OsString> = [
+            b"left\xff".to_vec(),
+            b"base\xff".to_vec(),
+            b"right\xff".to_vec(),
+            b"output\xff".to_vec(),
+        ]
+        .into_iter()
+        .map(OsString::from_vec)
+        .collect();
+        let edit = Cli::try_parse_from([
+            OsString::from("jjc"),
+            OsString::from("edit"),
+            paths[0].clone(),
+        ])
+        .unwrap();
+        assert!(matches!(edit.command, Command::Edit { file, .. } if file.as_os_str() == paths[0]));
+
+        let diff = Cli::try_parse_from([
+            OsString::from("jjc"),
+            OsString::from("diff"),
+            paths[0].clone(),
+            paths[2].clone(),
+            paths[3].clone(),
+        ])
+        .unwrap();
+        match diff.command {
+            Command::Diff {
+                left,
+                right,
+                output,
+            } => {
+                assert_eq!(left.as_os_str(), paths[0]);
+                assert_eq!(right.as_os_str(), paths[2]);
+                assert_eq!(output.as_os_str(), paths[3]);
+            }
+            _ => panic!("expected diff command"),
+        }
+
+        let mut args = vec![OsString::from("jjc"), OsString::from("merge")];
+        args.extend(paths.iter().cloned());
+        args.extend(["--marker-length", "7", "--path", "src/lib.rs"].map(OsString::from));
+        match Cli::try_parse_from(args).unwrap().command {
+            Command::Merge {
+                left,
+                base,
+                right,
+                output,
+                ..
+            } => {
+                assert_eq!(left.as_os_str(), paths[0]);
+                assert_eq!(base.as_os_str(), paths[1]);
+                assert_eq!(right.as_os_str(), paths[2]);
+                assert_eq!(output.as_os_str(), paths[3]);
+            }
+            _ => panic!("expected merge command"),
+        }
+    }
+
+    #[test]
     fn parses_doctor_command() {
         let cli = Cli::try_parse_from(["jjc", "doctor"]).unwrap();
 

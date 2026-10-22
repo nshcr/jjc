@@ -3,7 +3,7 @@
 This document is the canonical product roadmap for `jjc`. Detailed historical
 work and acceptance evidence live in the phase documents linked below.
 
-Status as of 2026-10-13:
+Status as of 2026-10-23:
 
 - Foundation milestones and Phase 2 are complete within their recorded scope.
 - Phase 3 features are implemented, but later review found integration and
@@ -449,6 +449,32 @@ Upstream sources: [text-editor substitutions and bulk descriptions](https://gith
 [split description editing](https://github.com/jj-vcs/jj/blob/v0.46.0/cli/src/commands/split.rs),
 [file editing](https://github.com/jj-vcs/jj/blob/v0.46.0/cli/src/commands/file/edit.rs),
 and [upstream Rust requirement](https://github.com/jj-vcs/jj/blob/v0.46.0/Cargo.toml).
+
+### Local branch consolidation: 2026-10-23
+
+The [upstream audit](upstream-alignment-2026-10-23.md) confirms that jj 0.46.0
+remains the latest stable release. The Rust 1.97.1 and jj 0.46.0 baselines stay
+unchanged. Unreleased main's new built-in `:editor` merge route was inspected
+from source; it has not been built or run and does not extend jjc's supported
+external merge protocol.
+
+The `dev` branch's editor preparation (`21b9e85`) was superseded by the stable
+alignment (`7e919e3`). Its consolidation retains main's new-file editing,
+doctor configuration, real split/file-edit terminal coverage, and current
+version gates. Unique CLI/native-path and editor protocol test cases are
+retained where they close coverage gaps. The historical dev audit is preserved
+with its original evidence boundary.
+
+The `agent/terminal-e2e-coverage` and `codex/fix-tty-resize-frame-sync` branches
+contain patch-equivalent changes already on main. They require no additional
+merge. No source branch is deleted and no remote branch is changed.
+
+The consolidated candidate passed `./scripts/verify.sh full` locally on macOS
+arm64 with Rust 1.97.1 and jj 0.46.0: all 214 tests, all 84 strict integrations,
+locked offline installation, and installed doctor. The
+[audit acceptance record](upstream-alignment-2026-10-23.md#local-acceptance)
+names the retained logs and platform boundary. Hosted CI on the resulting
+merge revision remains unverified.
 
 ## Validation policy
 

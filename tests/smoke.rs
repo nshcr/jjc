@@ -25,12 +25,17 @@ fn edit_starts_at_requested_line_and_clamps_at_eof() -> io::Result<()> {
     ));
     fs::create_dir_all(&root)?;
     let file = root.join("with spaces.txt");
-    for (line, expected) in [
-        ("1", "Xfirst\nsecond\n"),
-        ("2", "first\nXsecond\n"),
-        ("999", "first\nXsecond\n"),
+    let maximum_line = usize::MAX.to_string();
+    for (original, line, expected) in [
+        ("first\nsecond\n", "1", "Xfirst\nsecond\n"),
+        ("first\nsecond\n", "2", "first\nXsecond\n"),
+        ("first\nsecond\n", "999", "first\nXsecond\n"),
+        ("first\r\n正文\r\nlast", "2", "first\r\nX正文\r\nlast"),
+        ("", "1", "X"),
+        ("", &maximum_line, "X"),
+        ("first\nsecond\n", &maximum_line, "first\nXsecond\n"),
     ] {
-        fs::write(&file, "first\nsecond\n")?;
+        fs::write(&file, original)?;
         assert_success(
             Command::new(jjc())
                 .args(["edit", "--line", line, "--"])
@@ -48,6 +53,88 @@ fn edit_starts_at_requested_line_and_clamps_at_eof() -> io::Result<()> {
     assert!(!output.status.success());
     assert_eq!(fs::read_to_string(&file)?, "first\nXsecond\n");
     fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn jj_bulk_describe_preserves_commit_headers_and_descriptions() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("bulk-describe")?;
+    assert_success(
+        jj(&repo)
+            .args(["describe", "-m", "first description\n\nfirst body"])
+            .output()?,
+    );
+    assert_success(
+        jj(&repo)
+            .args(["new", "-m", "second description\n\nsecond body"])
+            .output()?,
+    );
+    // jj 0.46 places the first summary after six instruction/separator lines,
+    // then separates these descriptions with seven lines including the body.
+    assert_success(
+        jj(&repo)
+            .args(text_editor_config())
+            .args(["describe", "--editor", "-r", "@ | @-"])
+            .env(
+                "JJC_KEYS",
+                "ggjjjjjjccfirst edited<Esc>jjjjjjjccsecond edited<Esc><C-s>",
+            )
+            .output()?,
+    );
+    for (revision, expected) in [
+        ("@-", "first edited\n\nfirst body\n"),
+        ("@", "second edited\n\nsecond body\n"),
+    ] {
+        let output = jj(&repo)
+            .args(["log", "-r", revision, "--no-graph", "-T", "description"])
+            .output()?;
+        assert_success_ref(&output);
+        assert_eq!(output.stdout, expected.as_bytes());
+    }
+    fs::remove_dir_all(repo.parent().unwrap())?;
+    Ok(())
+}
+
+#[test]
+fn jj_bulk_describe_cancel_preserves_both_commits() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = init_repo("bulk-describe-cancel")?;
+    assert_success(
+        jj(&repo)
+            .args(["describe", "-m", "first description"])
+            .output()?,
+    );
+    assert_success(
+        jj(&repo)
+            .args(["new", "-m", "second description"])
+            .output()?,
+    );
+    let log_args = [
+        "log",
+        "-r",
+        "@ | @-",
+        "--no-graph",
+        "-T",
+        "commit_id ++ description",
+    ];
+    let before = jj(&repo).args(log_args).output()?;
+    assert_success_ref(&before);
+    let output = jj(&repo)
+        .args(text_editor_config())
+        .args(["describe", "--editor", "-r", "@ | @-"])
+        .env("JJC_KEYS", "iUNSAVED<Esc>:q!<Enter>")
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("edit canceled"));
+    let after = jj(&repo).args(log_args).output()?;
+    assert_success_ref(&after);
+    assert_eq!(after.stdout, before.stdout);
+    fs::remove_dir_all(repo.parent().unwrap())?;
     Ok(())
 }
 
