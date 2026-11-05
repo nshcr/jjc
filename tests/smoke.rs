@@ -1045,17 +1045,7 @@ fn jj_resolve_multi_side_conflict_stays_protocol_limited() -> io::Result<()> {
     if !jj_available() {
         return Ok(());
     }
-    let repo = init_repo("multi-side")?;
-    fs::write(repo.join("file.txt"), "base\n")?;
-    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
-    let one = change_file_on_new_child(&repo, "one", "one\n")?;
-    let two = change_file_on_new_child(&repo, "two", "two\n")?;
-    let three = change_file_on_new_child(&repo, "three", "three\n")?;
-    assert_success(
-        jj(&repo)
-            .args(["new", &one, &two, &three, "-m", "merge"])
-            .output()?,
-    );
+    let repo = multi_side_conflict_repo("multi-side")?;
 
     let output = jj(&repo)
         .env("JJC_KEYS", "3w")
@@ -1069,6 +1059,116 @@ fn jj_resolve_multi_side_conflict_stays_protocol_limited() -> io::Result<()> {
     assert_success_ref(&output);
     assert!(String::from_utf8_lossy(&output.stdout).contains("3-sided"));
     Ok(())
+}
+
+#[test]
+fn jj_resolve_text_editor_resolves_three_sided_conflict() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = multi_side_conflict_repo("text-editor-three-sided")?;
+    let original = fs::read_to_string(repo.join("file.txt"))?;
+    let conflicts = jj(&repo).args(["resolve", "--list"]).output()?;
+    assert_success_ref(&conflicts);
+    assert!(String::from_utf8_lossy(&conflicts.stdout).contains("3-sided"));
+
+    // Replace the materialized markers and all three sides in the ordinary
+    // text editor; this route uses ui.editor, not merge-tools.jjc.
+    let keys = format!(
+        "gg{}iResolved all three sides<C-s>",
+        "dd".repeat(original.lines().count())
+    );
+    assert_success(
+        jj(&repo)
+            .args(text_editor_config())
+            .args(["resolve", "--tool", ":editor", "root:file.txt"])
+            .env("JJC_KEYS", keys)
+            .output()?,
+    );
+    assert_eq!(
+        fs::read(repo.join("file.txt"))?,
+        b"Resolved all three sides\n"
+    );
+    let output = jj(&repo).args(["resolve", "--list"]).output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("No conflicts found"));
+    fs::remove_dir_all(repo.parent().unwrap())?;
+    Ok(())
+}
+
+#[test]
+fn jj_resolve_text_editor_cancel_preserves_three_sided_conflict() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = multi_side_conflict_repo("text-editor-three-sided-cancel")?;
+    let original = fs::read(repo.join("file.txt"))?;
+    let log_args = ["log", "-r", "@", "--no-graph", "-T", "commit_id"];
+    let before = jj(&repo).args(log_args).output()?;
+    assert_success_ref(&before);
+    let output = jj(&repo)
+        .args(text_editor_config())
+        .args(["resolve", "--tool", ":editor", "root:file.txt"])
+        .env("JJC_KEYS", "iUNSAVED<C-c>")
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("edit canceled"));
+    assert_eq!(fs::read(repo.join("file.txt"))?, original);
+    let after = jj(&repo).args(log_args).output()?;
+    assert_success_ref(&after);
+    assert_eq!(after.stdout, before.stdout);
+    let conflicts = jj(&repo).args(["resolve", "--list"]).output()?;
+    assert_success_ref(&conflicts);
+    assert!(String::from_utf8_lossy(&conflicts.stdout).contains("3-sided"));
+    fs::remove_dir_all(repo.parent().unwrap())?;
+    Ok(())
+}
+
+#[test]
+fn jj_resolve_text_editor_rejects_unchanged_output() -> io::Result<()> {
+    if !jj_available() {
+        return Ok(());
+    }
+    let repo = multi_side_conflict_repo("text-editor-unchanged")?;
+    let original = fs::read(repo.join("file.txt"))?;
+    let log_args = ["log", "-r", "@", "--no-graph", "-T", "commit_id"];
+    let before = jj(&repo).args(log_args).output()?;
+    assert_success_ref(&before);
+    let output = jj(&repo)
+        .args(text_editor_config())
+        .args(["resolve", "--tool", ":editor", "root:file.txt"])
+        .env("JJC_KEYS", "<C-s>")
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("The output file is either unchanged or empty after the editor quit"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read(repo.join("file.txt"))?, original);
+    let after = jj(&repo).args(log_args).output()?;
+    assert_success_ref(&after);
+    assert_eq!(after.stdout, before.stdout);
+    let conflicts = jj(&repo).args(["resolve", "--list"]).output()?;
+    assert_success_ref(&conflicts);
+    assert!(String::from_utf8_lossy(&conflicts.stdout).contains("3-sided"));
+    fs::remove_dir_all(repo.parent().unwrap())?;
+    Ok(())
+}
+
+fn multi_side_conflict_repo(name: &str) -> io::Result<PathBuf> {
+    let repo = init_repo(name)?;
+    fs::write(repo.join("file.txt"), "base\n")?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+    let one = change_file_on_new_child(&repo, "one", "one\n")?;
+    let two = change_file_on_new_child(&repo, "two", "two\n")?;
+    let three = change_file_on_new_child(&repo, "three", "three\n")?;
+    assert_success(
+        jj(&repo)
+            .args(["new", &one, &two, &three, "-m", "merge"])
+            .output()?,
+    );
+    Ok(repo)
 }
 
 fn init_repo(name: &str) -> io::Result<PathBuf> {

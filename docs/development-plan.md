@@ -3,7 +3,7 @@
 This document is the canonical product roadmap for `jjc`. Detailed historical
 work and acceptance evidence live in the phase documents linked below.
 
-Status as of 2026-10-23:
+Status as of 2026-11-05:
 
 - Foundation milestones and Phase 2 are complete within their recorded scope.
 - Phase 3 features are implemented, but later review found integration and
@@ -12,7 +12,7 @@ Status as of 2026-10-23:
   boundaries. The hosted CI result remains pending external evidence.
 - [Phase 5](phase-5-terminal-ux-plan.md) is implemented and locally verified;
   its hosted CI result remains pending external evidence.
-- The current protocol baseline is `jj 0.46.0`; the upstream alignments below
+- The current protocol baseline is `jj 0.47.1`; the upstream alignments below
   supersede historical phase versions without changing the three CLI routes.
 
 ## Product contract
@@ -190,7 +190,7 @@ The checkout already contains:
 - A read-only `jjc doctor` whose generated config is exercised through all three
   routes and whose version status distinguishes the tested protocol from drift.
 - Rust 1.97.1 metadata and CI matrices for formatting, clippy, tests, pinned
-  `jj 0.46.0`, installation, and latest-`jj` advisory probing.
+  `jj 0.47.1`, installation, and latest-`jj` advisory probing.
 
 The Phase 5 local gate passed from the converged working state. After the branch
 is published, the hosted CI result remains separate external evidence.
@@ -475,6 +475,13 @@ locked offline installation, and installed doctor. The
 [audit acceptance record](upstream-alignment-2026-10-23.md#local-acceptance)
 names the retained logs and platform boundary. Hosted CI on the resulting
 merge revision remains unverified.
+
+### Upstream alignment: jj 0.47.1
+
+The [2026-11-05 audit](upstream-alignment-2026-11-05.md) promotes the stable
+protocol baseline to jj 0.47.1 while retaining Rust 1.97.1. The newly released
+`:editor` route reuses jjc text editing for multi-side conflict markers and
+first-conflict line positioning; the external merge UI remains two-sided.
 
 ## Validation policy
 

@@ -9,19 +9,24 @@ terminal, filesystem, or conflict shape.
 | Surface | Current contract | Evidence tier |
 | --- | --- | --- |
 | Rust | 1.97.1 is the minimum and blocking toolchain | local and CI quality gates |
-| `jj` | 0.46.0 is the blocking protocol baseline | real-`jj` smoke, tree, marker, and PTY tests |
+| `jj` | 0.47.1 is the blocking protocol baseline | real-`jj` smoke, tree, marker, and PTY tests |
 | newer `jj` | probed weekly without expanding the support claim | advisory CI only |
 | Linux | build, unit, real-`jj`, PTY, executable, and symlink behavior | Tier 1 |
 | macOS | build, unit, real-`jj`, PTY, executable, and symlink behavior | Tier 1 |
 | Windows | build, Clippy, portable tests, install, and binary startup | Tier 2 |
 
-jjc and upstream jj 0.46.0 share Rust 1.97.1 for blocking checks and release
+jjc and upstream jj 0.47.1 share Rust 1.97.1 for blocking checks and release
 builds. The latest-jj advisory installs stable Rust only for compiling a newer
 upstream binary; jjc is still tested with the pinned toolchain.
 
 Tier 2 does not claim Windows ConPTY interaction or Unix filesystem semantics.
 Unsupported merge and tree-entry shapes remain listed in the README's current
 limits.
+
+The jj 0.47.1 baseline also covers `jj resolve --tool :editor` through
+`ui.editor`: manual marker editing supports multi-side conflicts and opens at
+the first conflict. This does not expand the named external merge tool's
+two-side protocol. Empty and unchanged results remain upstream errors.
 
 ## Version maintenance
 

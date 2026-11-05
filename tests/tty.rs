@@ -927,6 +927,82 @@ fn jj_resolve_uses_merge_editor_tty() -> io::Result<()> {
 }
 
 #[test]
+fn jj_resolve_text_editor_tty_starts_at_first_conflict_and_saves_or_cancels() -> io::Result<()> {
+    if !expect_available() || !jj_available() {
+        return Ok(());
+    }
+    for cancel in [false, true] {
+        let (root, repo) = multi_side_conflict_repo("resolve-text-editor-tty")?;
+        let log = root.join("tty.log");
+        let original = fs::read_to_string(repo.join("file.txt"))?;
+        let first_conflict = original
+            .lines()
+            .position(|line| line.starts_with("<<<<<<<"))
+            .expect("fixture should contain conflict markers")
+            + 1;
+        assert_eq!(first_conflict, 31);
+        let before = description_log(&repo, "@", "commit_id")?;
+        let keys = if cancel {
+            "iUNSAVED\x03".to_owned()
+        } else {
+            format!(
+                "gg{}i{}Resolved all three sides\x13",
+                "dd".repeat(original.lines().count()),
+                numbered_lines("context", 30).replace('\n', "\r")
+            )
+        };
+        // Wait for the initial status before sending any motion: it must show
+        // the upstream $line placement, even though the conflict is offscreen
+        // when opening the same file at line 1.
+        let input_script = format!(
+            "{position}send -- {keys}\n",
+            position = expect_exact_script(&format!("{first_conflict}/")),
+            keys = tcl_string(&keys),
+        );
+        expect_alt_screen_session_script(
+            &log,
+            "jj",
+            &jj_editor_args(&repo, ["resolve", "--tool", ":editor", "root:file.txt"]),
+            "",
+            &input_script,
+            i32::from(cancel),
+        )?;
+        assert_alt_screen_log(&log)?;
+        assert_screen_log_contains(&log, &format!("line {first_conflict}/"))?;
+        assert_screen_log_contains(&log, "<<<<<<<")?;
+        if cancel {
+            assert_eq!(fs::read(repo.join("file.txt"))?, original.as_bytes());
+            assert_eq!(description_log(&repo, "@", "commit_id")?, before);
+            assert!(fs::read_to_string(&log)?.contains("edit canceled"));
+            let conflicts = jj(&repo).args(["resolve", "--list"]).output()?;
+            assert_success_ref(&conflicts);
+            assert!(String::from_utf8_lossy(&conflicts.stdout).contains("3-sided"));
+        } else {
+            assert_eq!(
+                fs::read_to_string(repo.join("file.txt"))?,
+                format!(
+                    "{}Resolved all three sides\n",
+                    numbered_lines("context", 30)
+                )
+            );
+            let conflicts = jj(&repo).args(["resolve", "--list"]).output()?;
+            assert!(!conflicts.status.success());
+            assert!(String::from_utf8_lossy(&conflicts.stderr).contains("No conflicts found"));
+        }
+        preserve_protocol_log(
+            &log,
+            if cancel {
+                "resolve-text-editor-cancel.log"
+            } else {
+                "resolve-text-editor-save.log"
+            },
+        )?;
+        fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+#[test]
 fn jj_split_tty_can_unselect_one_whole_hunk() -> io::Result<()> {
     if !expect_available() || !jj_available() {
         return Ok(());
@@ -1171,6 +1247,30 @@ fn conflict_repo(name: &str) -> io::Result<(PathBuf, PathBuf)> {
             .args(["new", &left, &right, "-m", "merge"])
             .output()?,
     );
+    Ok((root, repo))
+}
+
+fn multi_side_conflict_repo(name: &str) -> io::Result<(PathBuf, PathBuf)> {
+    let root = temp_root()?;
+    let repo = init_repo(&root, name)?;
+    let prefix = numbered_lines("context", 30);
+    fs::write(repo.join("file.txt"), format!("{prefix}base\n"))?;
+    assert_success(jj(&repo).args(["describe", "-m", "base"]).output()?);
+    let base = rev(&repo)?;
+    let mut sides = Vec::new();
+    for side in ["one", "two", "three"] {
+        assert_success(jj(&repo).args(["new", &base, "-m", side]).output()?);
+        fs::write(repo.join("file.txt"), format!("{prefix}{side}\n"))?;
+        sides.push(rev(&repo)?);
+    }
+    assert_success(
+        jj(&repo)
+            .args(["new", &sides[0], &sides[1], &sides[2], "-m", "merge"])
+            .output()?,
+    );
+    let conflicts = jj(&repo).args(["resolve", "--list"]).output()?;
+    assert_success_ref(&conflicts);
+    assert!(String::from_utf8_lossy(&conflicts.stdout).contains("3-sided"));
     Ok((root, repo))
 }
 

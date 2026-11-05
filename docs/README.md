@@ -29,6 +29,7 @@ not current support claims:
 - [`merge-editor-analysis-2026-07-05.md`](merge-editor-analysis-2026-07-05.md)
 - [`upstream-alignment-2026-10-03.md`](upstream-alignment-2026-10-03.md)
 - [`upstream-alignment-2026-10-23.md`](upstream-alignment-2026-10-23.md)
+- [`upstream-alignment-2026-11-05.md`](upstream-alignment-2026-11-05.md)
 
 Durable compatibility or protocol decisions should be reflected in a current
 contract first. Add a focused decision record only when the rationale cannot be
